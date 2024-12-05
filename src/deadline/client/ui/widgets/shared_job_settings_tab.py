@@ -6,10 +6,9 @@ A UI Widget containing the render setup tab
 from __future__ import annotations
 
 import sys
-import threading
 from typing import Any, Dict, Optional
 
-from qtpy.QtCore import Signal  # type: ignore
+from qtpy.QtCore import Signal, QThread  # type: ignore
 from qtpy.QtWidgets import (  # type: ignore
     QComboBox,
     QFormLayout,
@@ -25,9 +24,29 @@ from qtpy.QtWidgets import (  # type: ignore
 
 from ... import api
 from ...config import get_setting
-from .. import CancelationFlag
 from .openjd_parameters_widget import OpenJDParametersWidget
 from ...api import get_queue_parameter_definitions
+
+
+class _DeadlineRefreshQueueThread(QThread):
+
+    queue_parameters_updated = Signal(int, list, Exception)
+
+    def __init__(self, refresh_id, farm_id, queue_id, parent=None):
+        super(_DeadlineRefreshQueueThread, self).__init__(parent)
+
+        self._refresh_id = refresh_id
+        self._farm_id = farm_id
+        self._queue_id = queue_id
+
+    def run(self):
+        try:
+            queue_parameters = get_queue_parameter_definitions(
+                farmId=self._farm_id, queueId=self._queue_id
+            )
+            self.queue_parameters_updated.emit(self._refresh_id, queue_parameters, None)
+        except Exception as e:
+            self.queue_parameters_updated.emit(self._refresh_id, None, e)
 
 
 class SharedJobSettingsWidget(QWidget):  # pylint: disable=too-few-public-methods
@@ -87,13 +106,9 @@ class SharedJobSettingsWidget(QWidget):  # pylint: disable=too-few-public-method
             lambda message: self.parameter_changed.emit(message)
         )
 
-        self.__refresh_queue_parameters_thread: Optional[threading.Thread] = None
+        self.__refresh_queue_parameters_thread: Optional[_DeadlineRefreshQueueThread] = None
         self.__refresh_queue_parameters_id = 0
         self.__valid_queue = False
-        self.canceled = CancelationFlag()
-        self.destroyed.connect(self.canceled.set_canceled)
-        self._queue_parameters_update.connect(self._handle_queue_parameters_update)
-        self._background_exception.connect(self._handle_background_queue_parameters_exception)
         self._start_load_queue_parameters_thread()
 
         # Set any "deadline:*" parameters, like deadline:priority.
@@ -101,14 +116,6 @@ class SharedJobSettingsWidget(QWidget):  # pylint: disable=too-few-public-method
         for name, value in initial_shared_parameter_values.items():
             if name.startswith("deadline:"):
                 self.set_parameter_value({"name": name, "value": value})
-
-    def __del__(self):
-        self.canceled.set_canceled()
-        if (
-            self.__refresh_queue_parameters_thread
-            and self.__refresh_queue_parameters_thread.is_alive()
-        ):
-            self.__refresh_queue_parameters_thread.join()
 
     def refresh_ui(self, job_settings: Any, load_new_bundle: bool = False):
         # Refresh the job settings in the UI
@@ -145,28 +152,16 @@ class SharedJobSettingsWidget(QWidget):  # pylint: disable=too-few-public-method
             if (
                 (queue_id != self.queue_id or load_new_bundle)
                 and self.__refresh_queue_parameters_thread
-                and self.__refresh_queue_parameters_thread.is_alive()
+                and self.__refresh_queue_parameters_thread.isRunning()
             ):
                 self.__refresh_queue_parameters_thread.join()
 
             # Start the thread if it doesn't exist or is not alive
             if (
                 not self.__refresh_queue_parameters_thread
-                or not self.__refresh_queue_parameters_thread.is_alive()
+                or not self.__refresh_queue_parameters_thread.isRunning()
             ):
                 self._start_load_queue_parameters_thread()
-
-    def _handle_background_queue_parameters_exception(self, title: str, error: BaseException):
-        self.__valid_queue = False
-        self.valid_parameters.emit(False)
-        if self.__refresh_queue_parameters_thread:
-            self.canceled.set_canceled()
-            self.__refresh_queue_parameters_thread.join()
-        self.queue_parameters_box.rebuild_ui(
-            async_loading_state="Error loading queue environments: {}\n\nError traceback: {}".format(
-                title, error
-            )
-        )
 
     def _start_load_queue_parameters_thread(self):
         """
@@ -179,20 +174,21 @@ class SharedJobSettingsWidget(QWidget):  # pylint: disable=too-few-public-method
             # the thread.
             return
         self.__refresh_queue_parameters_id += 1
-        self.canceled = CancelationFlag()
-        self.__refresh_queue_parameters_thread = threading.Thread(
-            target=self._load_queue_parameters_thread_function,
-            name="AWS Deadline Cloud load queue parameters thread",
-            args=(self.__refresh_queue_parameters_id, farm_id, queue_id),
+        self.__refresh_queue_parameters_thread = _DeadlineRefreshQueueThread(
+            self.__refresh_queue_parameters_id, farm_id, queue_id, self
         )
+        self.__refresh_queue_parameters_thread.queue_parameters_updated.connect(
+            self._handle_queue_parameters_update
+        )
+        self.destroyed.connect(self.__refresh_queue_parameters_thread.requestInterruption)
         self.__refresh_queue_parameters_thread.start()
 
     def is_queue_valid(self) -> bool:
         return self.__valid_queue
 
-    def _handle_queue_parameters_update(self, refresh_id, queue_parameters):
+    def _handle_queue_parameters_update(self, refresh_id, queue_parameters, exception):
         # Apply the refresh if it's still for the latest call
-        if refresh_id == self.__refresh_queue_parameters_id:
+        if queue_parameters and refresh_id == self.__refresh_queue_parameters_id:
             self.__valid_queue = True
             self.valid_parameters.emit(True)
             # Apply the initial queue parameter values
@@ -200,6 +196,14 @@ class SharedJobSettingsWidget(QWidget):  # pylint: disable=too-few-public-method
                 if parameter["name"] in self.initial_shared_parameter_values:
                     parameter["value"] = self.initial_shared_parameter_values[parameter["name"]]
             self.queue_parameters_box.rebuild_ui(parameter_definitions=queue_parameters)
+        elif exception:
+            self.__valid_queue = False
+            self.valid_parameters.emit(False)
+            self.queue_parameters_box.rebuild_ui(
+                async_loading_state="Error loading queue environments: {}\n\nError traceback: {}".format(
+                    "Invalid queue parameters", exception
+                )
+            )
 
     def _load_queue_parameters_thread_function(self, refresh_id: int, farm_id: str, queue_id: str):
         """
@@ -455,6 +459,32 @@ class DeadlineCloudSettingsWidget(QGroupBox):
         self.queue_box.refresh(deadline_authorized)
 
 
+class _DeadlineJobSettingsRefreshThread(QThread):
+
+    item_updated = Signal(int, str, str, str)
+    update_failed = Signal(str, BaseException)
+
+    def __init__(self, refresh_id, resource_name, setting_name, get_item, parent=None):
+        super(_DeadlineJobSettingsRefreshThread, self).__init__(parent)
+
+        self._refresh_id = refresh_id
+        self._get_item = get_item
+        self._setting_name = setting_name
+        self._resource_name = resource_name
+
+    def run(self):
+        """
+        This function gets started in a background thread to refresh the list.
+        """
+        try:
+            item = self._get_item(self._setting_name)
+            if not self.isInterruptionRequested():
+                self.item_updated.emit(self._refresh_id, *item)
+        except Exception as e:
+            if not self.isInterruptionRequested():
+                self.update_failed.emit(f"Refresh {self._resource_name} item", e)
+
+
 class _DeadlineNamedResourceDisplay(QWidget):
     """
     A Label for displaying an AWS Deadline Cloud resource, that starts displaying
@@ -467,21 +497,11 @@ class _DeadlineNamedResourceDisplay(QWidget):
         setting_name (str): The setting name for the item.
     """
 
-    # Emitted when the background refresh thread catches an exception,
-    # provides (operation_name, BaseException)
-    background_exception = Signal(str, BaseException)
-
-    # Emitted when an async refresh_item thread completes,
-    # provides (refresh_id, id, name, description)
-    _item_update = Signal(int, str, str, str)
-
     def __init__(self, *, resource_name, setting_name, parent=None):
         super().__init__(parent=parent)
 
         self.__refresh_thread = None
         self.__refresh_id = 0
-        self.canceled = CancelationFlag()
-        self.destroyed.connect(self.canceled.set_canceled)
 
         self.resource_name = resource_name
         self.setting_name = setting_name
@@ -498,8 +518,6 @@ class _DeadlineNamedResourceDisplay(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.label)
-        self._item_update.connect(self.handle_item_update)
-        self.background_exception.connect(self.handle_background_exception)
 
     def handle_background_exception(self, e):
         self.label.setText(self.item_id)
@@ -529,11 +547,12 @@ class _DeadlineNamedResourceDisplay(QWidget):
                 display_name = "<refreshing> - " + display_name
 
                 self.__refresh_id += 1
-                self.__refresh_thread = threading.Thread(
-                    target=self._refresh_thread_function,
-                    name=f"AWS Deadline Cloud refresh {self.resource_name} item thread",
-                    args=(self.__refresh_id,),
+                self.__refresh_thread = _DeadlineJobSettingsRefreshThread(
+                    self.__refresh_id, self.resource_name, self.setting_name, self.get_item
                 )
+                self.__refresh_thread.item_updated.connect(self.handle_item_update)
+                self.__refresh_thread.update_failed.connect(self.handle_background_exception)
+                self.destroyed.connect(self.__refresh_thread.requestInterruption)
                 self.__refresh_thread.start()
 
             self.label.setText(display_name)
@@ -550,25 +569,14 @@ class _DeadlineNamedResourceDisplay(QWidget):
             self.label.setText(self.item_display_name())
             self.label.setToolTip(self.item_description)
 
-    def _refresh_thread_function(self, refresh_id: int):
-        """
-        This function gets started in a background thread to refresh the list.
-        """
-        try:
-            item = self.get_item()
-            if not self.canceled:
-                self._item_update.emit(refresh_id, *item)
-        except BaseException as e:
-            if not self.canceled:
-                self.background_exception.emit(f"Refresh {self.resource_name} item", e)
-
 
 class DeadlineFarmDisplay(_DeadlineNamedResourceDisplay):
     def __init__(self, *, parent=None):
         super().__init__(resource_name="Farm", setting_name="defaults.farm_id", parent=parent)
 
-    def get_item(self):
-        farm_id = get_setting(self.setting_name)
+    @staticmethod
+    def get_item(setting_name: str):
+        farm_id = get_setting(setting_name)
         if farm_id:
             deadline = api.get_boto3_client("deadline")
             response = deadline.get_farm(farmId=farm_id)
@@ -581,9 +589,10 @@ class DeadlineQueueDisplay(_DeadlineNamedResourceDisplay):
     def __init__(self, *, parent=None):
         super().__init__(resource_name="Queue", setting_name="defaults.queue_id", parent=parent)
 
-    def get_item(self):
+    @staticmethod
+    def get_item(setting_name: str):
         farm_id = get_setting("defaults.farm_id")
-        queue_id = get_setting(self.setting_name)
+        queue_id = get_setting(setting_name)
         if farm_id and queue_id:
             deadline = api.get_boto3_client("deadline")
             response = deadline.get_queue(farmId=farm_id, queueId=queue_id)
@@ -604,10 +613,11 @@ class DeadlineStorageProfileNameDisplay(_DeadlineNamedResourceDisplay):
             parent=parent,
         )
 
-    def get_item(self):
+    @staticmethod
+    def get_item(setting_name: str):
         farm_id = get_setting("defaults.farm_id")
         queue_id = get_setting("defaults.queue_id")
-        storage_profile_id = get_setting(self.setting_name)
+        storage_profile_id = get_setting(setting_name)
 
         if farm_id and queue_id and storage_profile_id:
             deadline = api.get_boto3_client("deadline")

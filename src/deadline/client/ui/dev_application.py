@@ -76,7 +76,8 @@ class DevMainWindow(QMainWindow):
         DeadlineConfigDialog.configure_settings(parent=self)
 
     def login(self):
-        if DeadlineLoginDialog.login(parent=self):
+        self._login_dialog = DeadlineLoginDialog.login(parent=self)
+        if self._login_dialog.exec_():
             logger.info("Logged in successfully")
         else:
             logger.info("Failed to log in")

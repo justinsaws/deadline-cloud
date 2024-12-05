@@ -318,7 +318,8 @@ class SubmitJobToDeadlineDialog(QDialog):
             pass
 
     def on_login(self):
-        DeadlineLoginDialog.login(parent=self)
+        self._login_dialog = DeadlineLoginDialog.login(parent=self)
+        self._login_dialog.exec_()
         self.refresh_deadline_settings()
         # This widget watches the auth files, but that does
         # not always catch a change so force a refresh here.

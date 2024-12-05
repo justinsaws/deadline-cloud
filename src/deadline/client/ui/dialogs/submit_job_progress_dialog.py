@@ -8,15 +8,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import threading
 import textwrap
 from typing import Any, Dict, List, Optional, cast
 
 from botocore.client import BaseClient  # type: ignore[import]
-from qtpy.QtCore import Qt, Signal
+from qtpy.QtCore import Qt, Signal, QThread
 from qtpy.QtGui import QCloseEvent
 from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
-    QApplication,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -68,36 +66,191 @@ __all__ = ["SubmitJobProgressDialog"]
 logger = logging.getLogger(__name__)
 
 
+class _SubmitJobHashingThread(QThread):
+
+    hashing_thread_progress = Signal(ProgressReportMetadata)
+    hashing_success = Signal(SummaryStatistics, list)
+    hashing_exception = Signal(BaseException)
+
+    def __init__(
+        self,
+        asset_groups: list[AssetRootGroup],
+        asset_manager,
+        total_input_files: int,
+        total_input_bytes: int,
+        parent=None,
+    ) -> None:
+        super(_SubmitJobHashingThread, self).__init__(parent)
+
+        self._asset_groups = asset_groups
+        self._asset_manager = asset_manager
+        self._total_input_files = total_input_files
+        self._total_input_bytes = total_input_bytes
+
+    def run(self):
+        """
+        This function gets started in a background thread to start the hashing
+        of any job attachments.
+        """
+        try:
+
+            def _update_hash_progress(hashing_metadata: ProgressReportMetadata) -> bool:
+                self.hashing_thread_progress.emit(hashing_metadata)
+                return not self.isInterruptionRequested()
+
+            logger.info("Hashing job attachments files...")
+
+            # This thread is only started if self._asset_manager is set.
+            hashing_summary, manifests = cast(
+                S3AssetManager, self._asset_manager
+            ).hash_assets_and_create_manifest(
+                asset_groups=self._asset_groups,
+                total_input_files=self._total_input_files,
+                total_input_bytes=self._total_input_bytes,
+                hash_cache_dir=config_file.get_cache_directory(),
+                on_preparing_to_submit=_update_hash_progress,
+            )
+
+            logger.info("Finished hashing job attachments files.")
+
+            self.hashing_success.emit(hashing_summary, manifests)
+        except AssetSyncCancelledError as e:
+            # If it wasn't canceled, send the exception to the dialog
+            if self.isInterruptionRequested():
+                self.hashing_exception.emit(e)
+            else:
+                logger.info("Job attachments hashing canceled.")
+        except Exception as e:
+            # Send the exception to the dialog
+            self.hashing_exception.emit(e)
+
+
+class _SubmitJobUploadThread(QThread):
+
+    upload_success = Signal(SummaryStatistics, dict)
+    upload_exception = Signal(BaseException)
+    upload_thread_update = Signal(ProgressReportMetadata)
+
+    def __init__(self, asset_manifests, asset_manager, job_bundle_dir, parent=None):
+        super(_SubmitJobUploadThread, self).__init__(parent)
+
+        self._asset_manifests = asset_manifests
+        self._asset_manager = asset_manager
+        self._job_bundle_dir = job_bundle_dir
+
+    @api.record_success_fail_telemetry_event(metric_name="gui_asset_upload")  # type: ignore
+    def run(self):
+        """
+        This function gets started in a background thread to start the upload
+        of any job attachments.
+        """
+        try:
+
+            def _update_upload_progress(upload_metadata: ProgressReportMetadata) -> bool:
+                self.upload_thread_update.emit(upload_metadata)
+                return not self.isInterruptionRequested()
+
+            logger.info("Uploading job attachments files...")
+
+            # This thread is only started if self._asset_manager is set.
+            upload_summary, attachment_settings = cast(
+                S3AssetManager, self._asset_manager
+            ).upload_assets(
+                manifests=self._asset_manifests,
+                on_uploading_assets=_update_upload_progress,
+                s3_check_cache_dir=config_file.get_cache_directory(),
+                manifest_write_dir=self._job_bundle_dir,
+            )
+
+            logger.info("Finished uploading job attachments files.")
+
+            self.upload_success.emit(upload_summary, attachment_settings.to_dict())
+        except AssetSyncCancelledError as e:
+            # If it wasn't canceled, send the exception to the dialog
+            if not self.isInterruptionRequested():
+                self.upload_exception.emit(e)
+            else:
+                logger.info("Job attachments upload canceled.")
+        except Exception as e:
+            # Send the exception to the dialog
+            self.upload_exception.emit(e)
+
+
+class _SubmitJobCreateJobThread(QThread):
+
+    create_job_exception = Signal(BaseException)
+    create_job_success = Signal(bool, str)
+
+    def __init__(self, farm_id, queue_id, deadline_client, create_job_args, parent=None):
+        super(_SubmitJobCreateJobThread, self).__init__(parent)
+
+        self._deadline_client = deadline_client
+        self._create_job_args = create_job_args
+        self._farm_id = farm_id
+        self._queue_id = queue_id
+
+    def run(self):
+        """
+        This function gets started in a background thread to call CreateJob.
+        """
+        try:
+
+            def _continue_create_job_wait() -> bool:
+                return not self.isInterruptionRequested()
+
+            logger.info("Waiting for job to be created...")
+
+            success = False
+
+            logger.debug(json.dumps(self._create_job_args, indent=1))
+            create_job_response = self._deadline_client.create_job(**self._create_job_args)
+            logger.debug(f"CreateJob Response {create_job_response}")
+
+            if create_job_response and "jobId" in create_job_response:
+                job_id = create_job_response["jobId"]
+
+                # Set the default job id so it holds the most-recently submitted job.
+                set_setting("defaults.job_id", job_id)
+
+                success, message = api.wait_for_create_job_to_complete(
+                    self._farm_id,
+                    self._queue_id,
+                    job_id,
+                    self._deadline_client,
+                    _continue_create_job_wait,
+                )
+                message += f"\n{job_id}\n"
+            else:
+                message = "CreateJob response was empty, or did not contain a job ID."
+            if success:
+                self.create_job_success.emit(success, message)
+            else:
+                self.create_job_exception.emit(DeadlineOperationError(message))
+        except CreateJobWaiterCanceled as e:
+            # If it wasn't canceled, send the exception to the dialog
+            if not self.isInterruptionRequested():
+                self.create_job_exception.emit(e)
+            else:
+                logger.info("Wait for CreateJob result canceled.")
+        except Exception as e:
+            # Send the exception to the dialog
+            self.create_job_exception.emit(e)
+
+
 class SubmitJobProgressDialog(QDialog):
     """
     A modal dialog box for the submission progress while submitting a job bundle
     to AWS Deadline Cloud.
     """
 
-    # These signals are sent when the background threads raise an exception.
-    hashing_thread_exception = Signal(BaseException)
-    upload_thread_exception = Signal(BaseException)
-    create_job_thread_exception = Signal(BaseException)
-
-    # These signals are sent when the background threads succeed.
-    hashing_thread_succeeded = Signal(SummaryStatistics, list)
-    upload_thread_succeeded = Signal(SummaryStatistics, dict)
-    create_job_thread_succeeded = Signal(bool, str)
-
-    # These signals are sent when the progress reporting callbacks are called
-    # from job attachments during hashing/uploading.
-    hashing_thread_progress_report = Signal(ProgressReportMetadata)
-    upload_thread_progress_report = Signal(ProgressReportMetadata)
-
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent=parent)
-        self._continue_submission = True
         self._submission_complete = False
         self._create_job_args: Dict[str, Any] = {}
         self._create_job_response: Dict[str, Any] = {}
-        self.__hashing_thread: Optional[threading.Thread] = None
-        self.__upload_thread: Optional[threading.Thread] = None
-        self.__create_job_thread: Optional[threading.Thread] = None
+        self.__hashing_thread: Optional[_SubmitJobHashingThread] = None
+        self.__upload_thread: Optional[_SubmitJobUploadThread] = None
+        self.__create_job_thread: Optional[_SubmitJobCreateJobThread] = None
 
         self._build_ui()
 
@@ -173,17 +326,6 @@ class SubmitJobProgressDialog(QDialog):
         self.lyt.addWidget(self.button_box)
 
         self.setWindowTitle("AWS Deadline Cloud submission")
-
-        self.hashing_thread_progress_report.connect(self.handle_hashing_thread_progress_report)
-        self.hashing_thread_succeeded.connect(self.handle_hashing_thread_succeeded)
-        self.hashing_thread_exception.connect(self.handle_thread_exception)
-
-        self.upload_thread_progress_report.connect(self.handle_upload_thread_progress_report)
-        self.upload_thread_succeeded.connect(self.handle_upload_thread_succeeded)
-        self.upload_thread_exception.connect(self.handle_thread_exception)
-
-        self.create_job_thread_succeeded.connect(self.handle_create_job_thread_succeeded)
-        self.create_job_thread_exception.connect(self.handle_thread_exception)
 
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.close)
@@ -324,132 +466,6 @@ class SubmitJobProgressDialog(QDialog):
         self.upload_progress.setVisible(False)
         self._start_create_job()
 
-    def _hashing_background_thread(
-        self,
-        asset_groups: list[AssetRootGroup],
-        total_input_files: int,
-        total_input_bytes: int,
-    ) -> None:
-        """
-        This function gets started in a background thread to start the hashing
-        of any job attachments.
-        """
-        try:
-
-            def _update_hash_progress(hashing_metadata: ProgressReportMetadata) -> bool:
-                self.hashing_thread_progress_report.emit(hashing_metadata)
-                return self._continue_submission
-
-            logger.info("Hashing job attachments files...")
-
-            # This thread is only started if self._asset_manager is set.
-            hashing_summary, manifests = cast(
-                S3AssetManager, self._asset_manager
-            ).hash_assets_and_create_manifest(
-                asset_groups=asset_groups,
-                total_input_files=total_input_files,
-                total_input_bytes=total_input_bytes,
-                hash_cache_dir=config_file.get_cache_directory(),
-                on_preparing_to_submit=_update_hash_progress,
-            )
-
-            logger.info("Finished hashing job attachments files.")
-
-            self.hashing_thread_succeeded.emit(hashing_summary, manifests)
-        except AssetSyncCancelledError as e:
-            # If it wasn't canceled, send the exception to the dialog
-            if self._continue_submission:
-                self.hashing_thread_exception.emit(e)
-            else:
-                logger.info("Job attachments hashing canceled.")
-        except Exception as e:
-            # Send the exception to the dialog
-            self.hashing_thread_exception.emit(e)
-
-    @api.record_success_fail_telemetry_event(metric_name="gui_asset_upload")  # type: ignore
-    def _upload_background_thread(self, manifests: List[AssetRootManifest]) -> None:
-        """
-        This function gets started in a background thread to start the upload
-        of any job attachments.
-        """
-        try:
-
-            def _update_upload_progress(upload_metadata: ProgressReportMetadata) -> bool:
-                self.upload_thread_progress_report.emit(upload_metadata)
-                return self._continue_submission
-
-            logger.info("Uploading job attachments files...")
-
-            # This thread is only started if self._asset_manager is set.
-            upload_summary, attachment_settings = cast(
-                S3AssetManager, self._asset_manager
-            ).upload_assets(
-                manifests=manifests,
-                on_uploading_assets=_update_upload_progress,
-                s3_check_cache_dir=config_file.get_cache_directory(),
-                manifest_write_dir=self._job_bundle_dir,
-            )
-
-            logger.info("Finished uploading job attachments files.")
-
-            self.upload_thread_succeeded.emit(upload_summary, attachment_settings.to_dict())
-        except AssetSyncCancelledError as e:
-            # If it wasn't canceled, send the exception to the dialog
-            if self._continue_submission:
-                self.hashing_thread_exception.emit(e)
-            else:
-                logger.info("Job attachments upload canceled.")
-        except Exception as e:
-            # Send the exception to the dialog
-            self.hashing_thread_exception.emit(e)
-
-    def _create_job_background_thread(self) -> None:
-        """
-        This function gets started in a background thread to call CreateJob.
-        """
-        try:
-
-            def _continue_create_job_wait() -> bool:
-                return self._continue_submission
-
-            logger.info("Waiting for job to be created...")
-
-            success = False
-
-            logger.debug(json.dumps(self._create_job_args, indent=1))
-            self._create_job_response = self._deadline_client.create_job(**self._create_job_args)
-            logger.debug(f"CreateJob Response {self._create_job_response}")
-
-            if self._create_job_response and "jobId" in self._create_job_response:
-                job_id = self._create_job_response["jobId"]
-
-                # Set the default job id so it holds the most-recently submitted job.
-                set_setting("defaults.job_id", job_id)
-
-                success, message = api.wait_for_create_job_to_complete(
-                    self._farm_id,
-                    self._queue_id,
-                    job_id,
-                    self._deadline_client,
-                    _continue_create_job_wait,
-                )
-                message += f"\n{job_id}\n"
-            else:
-                message = "CreateJob response was empty, or did not contain a job ID."
-            if success:
-                self.create_job_thread_succeeded.emit(success, message)
-            else:
-                self.create_job_thread_exception.emit(DeadlineOperationError(message))
-        except CreateJobWaiterCanceled as e:
-            # If it wasn't canceled, send the exception to the dialog
-            if self._continue_submission:
-                self.create_job_thread_exception.emit(e)
-            else:
-                logger.info("Wait for CreateJob result canceled.")
-        except Exception as e:
-            # Send the exception to the dialog
-            self.create_job_thread_exception.emit(e)
-
     def _start_hashing(
         self,
         asset_groups: list[AssetRootGroup],
@@ -460,11 +476,15 @@ class SubmitJobProgressDialog(QDialog):
         Starts the background hashing thread.
         """
         self.status_label.setText("Hashing job attachments...")
-        self.__hashing_thread = threading.Thread(
-            target=self._hashing_background_thread,
-            name="AWS Deadline Cloud hashing background thread",
-            args=(asset_groups, total_input_files, total_input_bytes),
+        self.__hashing_thread = _SubmitJobHashingThread(
+            asset_groups, self._asset_manager, total_input_files, total_input_bytes, self
         )
+        self.__hashing_thread.hashing_success.connect(self.handle_hashing_thread_succeeded)
+        self.__hashing_thread.hashing_thread_progress.connect(
+            self.handle_hashing_thread_progress_report
+        )
+        self.__hashing_thread.hashing_exception.connect(self.handle_thread_exception)
+        self.destroyed.connect(self.__hashing_thread.requestInterruption)
         self.__hashing_thread.start()
 
     def _start_upload(self, asset_manifests: List[AssetRootManifest]) -> None:
@@ -472,11 +492,13 @@ class SubmitJobProgressDialog(QDialog):
         Starts the background upload thread.
         """
         self.status_label.setText("Uploading job attachments...")
-        self.__upload_thread = threading.Thread(
-            target=self._upload_background_thread,
-            name="AWS Deadline Cloud upload background thread",
-            args=(asset_manifests,),
+        self.__upload_thread = _SubmitJobUploadThread(
+            asset_manifests, self._asset_manager, self._job_bundle_dir, self
         )
+        self.__upload_thread.upload_success.connect(self.handle_upload_thread_succeeded)
+        self.__upload_thread.upload_exception.connect(self.handle_thread_exception)
+        self.__upload_thread.upload_thread_update.connect(self.handle_upload_thread_progress_report)
+        self.destroyed.connect(self.__upload_thread.requestInterruption)
         self.__upload_thread.start()
 
     def _start_create_job(self) -> None:
@@ -484,10 +506,12 @@ class SubmitJobProgressDialog(QDialog):
         Starts the background thread to call CreateJob.
         """
         self.status_label.setText("Waiting for job to be created...")
-        self.__create_job_thread = threading.Thread(
-            target=self._create_job_background_thread,
-            name="AWS Deadline Cloud CreateJob background thread",
+        self.__create_job_thread = _SubmitJobCreateJobThread(
+            self._farm_id, self._queue_id, self._deadline_client, self._create_job_args, self
         )
+        self.__create_job_thread.create_job_success.connect(self.handle_create_job_thread_succeeded)
+        self.__create_job_thread.create_job_exception.connect(self.handle_thread_exception)
+        self.destroyed.connect(self.__create_job_thread.requestInterruption)
         self.__create_job_thread.start()
 
     def handle_hashing_thread_progress_report(
@@ -673,19 +697,7 @@ class SubmitJobProgressDialog(QDialog):
             self.hashing_progress.setVisible(False)
             self.upload_progress.setVisible(False)
             self.adjustSize()
-            self._continue_submission = False
-            self._shutdown_threads()
             super().closeEvent(event)
-
-    def _shutdown_threads(self) -> None:
-        """Closes any threads. Used before canceling/closing"""
-
-        threads = (self.__hashing_thread, self.__upload_thread, self.__create_job_thread)
-
-        for thread in threads:
-            if thread:
-                while thread.is_alive():
-                    QApplication.instance().processEvents()  # type: ignore[union-attr]
 
     def exec_(self) -> Optional[Dict[str, Any]]:  # type: ignore[override]
         """

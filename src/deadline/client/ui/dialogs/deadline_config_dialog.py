@@ -11,7 +11,6 @@ Example code:
 __all__ = ["DeadlineConfigDialog"]
 
 import sys
-import threading
 from configparser import ConfigParser
 from logging import getLogger, root
 from typing import Callable, Dict, List, Optional
@@ -19,7 +18,7 @@ from typing import Callable, Dict, List, Optional
 import boto3  # type: ignore[import]
 from botocore.exceptions import ProfileNotFound  # type: ignore[import]
 from deadline.job_attachments.models import FileConflictResolution, JobAttachmentsFileSystem
-from qtpy.QtCore import QSize, Qt, Signal
+from qtpy.QtCore import QSize, Qt, Signal, QThread
 from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
     QApplication,
     QCheckBox,
@@ -42,7 +41,7 @@ from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
 from ... import api
 from ..deadline_authentication_status import DeadlineAuthenticationStatus
 from ...config import config_file, get_setting_default, str2bool
-from .. import CancelationFlag, block_signals
+from .. import block_signals
 from ..widgets import DirectoryPickerWidget
 from ..widgets.deadline_authentication_status_widget import DeadlineAuthenticationStatusWidget
 from .deadline_login_dialog import DeadlineLoginDialog
@@ -124,7 +123,8 @@ class DeadlineConfigDialog(QDialog):
             super().accept()
 
     def on_login(self):
-        DeadlineLoginDialog.login(parent=self, config=self.config_box.config)
+        self._login_dialog = DeadlineLoginDialog.login(parent=self, config=self.config_box.config)
+        self._login_dialog.exec_()
         self.deadline_authentication_status.refresh_status()
         self.config_box.refresh()
 
@@ -615,6 +615,29 @@ class DeadlineWorkstationConfigWidget(QWidget):
         self.refresh()
 
 
+class _DeadlineResourceRefreshThread(QThread):
+
+    list_updated = Signal(int, list)
+    update_failed = Signal(BaseException)
+
+    def __init__(self, refresh_id, config, list_resources, parent=None):
+        super(_DeadlineResourceRefreshThread, self).__init__(parent)
+
+        self._config = config
+        self._refresh_id = refresh_id
+        self._list_resources = list_resources
+
+    def run(self):
+        """
+        This function gets started in a background thread to refresh the list.
+        """
+        try:
+            resources = self._list_resources(self._config)
+            self.list_updated.emit(self._refresh_id, resources)
+        except Exception as e:
+            self.update_failed.emit(e)
+
+
 class _DeadlineResourceListComboBox(QWidget):
     """
     A ComboBox for selecting an AWS Deadline Cloud Id, with a refresh button.
@@ -641,8 +664,6 @@ class _DeadlineResourceListComboBox(QWidget):
 
         self.__refresh_thread = None
         self.__refresh_id = 0
-        self.canceled = CancelationFlag()
-        self.destroyed.connect(self.canceled.set_canceled)
 
         self.resource_name = resource_name
         self.setting_name = setting_name
@@ -666,6 +687,7 @@ class _DeadlineResourceListComboBox(QWidget):
         with block_signals(self.box):
             self.box.clear()
         self.refresh_selected_id()
+        self.background_exception.emit(f"Refresh {self.resource_name}s list", e)
 
     def count(self) -> int:
         """Returns the number of items in the combobox"""
@@ -696,16 +718,17 @@ class _DeadlineResourceListComboBox(QWidget):
             self.box.addItem("<refreshing>", userData=selected_id)
 
         self.__refresh_id += 1
-        self.__refresh_thread = threading.Thread(
-            target=self._refresh_thread_function,
-            name=f"AWS Deadline Cloud refresh {self.resource_name} thread",
-            args=(self.__refresh_id, config),
+        self.__refresh_thread = _DeadlineResourceRefreshThread(
+            self.__refresh_id, self.config, self.list_resources, self
         )
+        self.__refresh_thread.list_updated.connect(self.handle_list_update)
+        self.__refresh_thread.update_failed.connect(self.handle_background_exception)
+        self.destroyed.connect(self.__refresh_thread.requestInterruption)
         self.__refresh_thread.start()
 
     def handle_list_update(self, refresh_id, items_list):
         # Apply the refresh if it's still for the latest call
-        if refresh_id == self.__refresh_id:
+        if items_list and refresh_id == self.__refresh_id:
             with block_signals(self.box):
                 self.box.clear()
                 for name, id in items_list:
@@ -730,18 +753,6 @@ class _DeadlineResourceListComboBox(QWidget):
                 else:
                     self.box.insertItem(0, "<none selected>", userData="")
                     self.box.setCurrentIndex(0)
-
-    def _refresh_thread_function(self, refresh_id: int, config: Optional[ConfigParser] = None):
-        """
-        This function gets started in a background thread to refresh the list.
-        """
-        try:
-            resources = self.list_resources(config=config)
-            if not self.canceled:
-                self._list_update.emit(refresh_id, resources)
-        except BaseException as e:
-            if not self.canceled and refresh_id == self.__refresh_id:
-                self.background_exception.emit(f"Refresh {self.resource_name}s list", e)
 
 
 class DeadlineFarmListComboBox(_DeadlineResourceListComboBox):
@@ -794,35 +805,37 @@ class DeadlineStorageProfileNameListComboBox(_DeadlineResourceListComboBox):
             storage_profiles = response.get("storageProfiles", [])
             # add a "<none selected>" option since its possible to select nothing for this type
             # of resource
+            current_os = DeadlineStorageProfileNameListComboBox._get_current_os()
             storage_profiles.append(
                 {
                     "storageProfileId": "",
                     "displayName": "<none selected>",
-                    "osFamily": self._get_current_os(),
+                    "osFamily": current_os,
                 }
             )
             return sorted(
                 [
                     (item["displayName"], item["storageProfileId"])
                     for item in storage_profiles
-                    if self._get_current_os() == item["osFamily"].lower()
+                    if current_os == item["osFamily"].lower()
                 ],
                 key=lambda item: (item[0].casefold(), item[1]),
             )
         else:
             return []
 
-    def _get_current_os(self) -> str:
+    @staticmethod
+    def _get_current_os() -> str:
         """
         Get a string specifying what the OS is, following the format the Deadline storage profile API expects.
         """
         if sys.platform.startswith("linux"):
-            return self.LINUX_OS
+            return DeadlineStorageProfileNameListComboBox.LINUX_OS
 
         if sys.platform.startswith("darwin"):
-            return self.MAC_OS
+            return DeadlineStorageProfileNameListComboBox.MAC_OS
 
         if sys.platform.startswith("win"):
-            return self.WINDOWS_OS
+            return DeadlineStorageProfileNameListComboBox.WINDOWS_OS
 
         return "Unknown"

@@ -3,17 +3,25 @@
 This documentation provides guidance on developer workflows for working with the code in this repository.
 
 Table of Contents:
-* [Development Environment Setup](#development-environment-setup)
-* [The Development Loop](#the-development-loop)
-* [Code Organization](#code-organization)
-* [Testing](#testing)
-   * [Writing tests](#writing-tests)
-   * [Unit tests](#unit-tests)
-   * [Integration tests](#integration-tests)
-* [Things to Know](#things-to-know)
-   * [Public contracts](#public-contracts)
-   * [Library Dependencies](#dependencies)
-   * [Qt and Calling AWS APIs](#qt-and-calling-aws-including-aws-deadline-cloud-apis)
+- [Development documentation](#development-documentation)
+  - [Development Environment Setup](#development-environment-setup)
+  - [The Development Loop](#the-development-loop)
+  - [Code Organization](#code-organization)
+  - [Testing](#testing)
+    - [Writing Tests](#writing-tests)
+    - [Unit Tests](#unit-tests)
+      - [Running Unit Tests](#running-unit-tests)
+      - [Running Docker-based Unit Tests](#running-docker-based-unit-tests)
+    - [Integration Tests](#integration-tests)
+      - [Running Integration Tests](#running-integration-tests)
+  - [Things to Know](#things-to-know)
+    - [Public Contracts](#public-contracts)
+    - [Library Dependencies](#library-dependencies)
+      - [Why is a new dependency needed?](#why-is-a-new-dependency-needed)
+      - [Quality of the dependency](#quality-of-the-dependency)
+      - [Version Pinning](#version-pinning)
+      - [Licensing](#licensing)
+    - [Qt and Calling AWS (including AWS Deadline Cloud) APIs](#qt-and-calling-aws-including-aws-deadline-cloud-apis)
 
 ## Development Environment Setup
 
@@ -266,22 +274,34 @@ See `deadline_config_dialog.py` for some examples that do all of the above. Here
 code that was edited to show how it fits together:
 
 ```python
-class MyCustomWidget(QWidget):
+class MyCustomWidgetUpdateThread(QThread):
    # Signals for the widget to receive from the thread
    background_exception = Signal(str, BaseException)
    update = Signal(int, BackgroundResult)
 
+   def __init__(self, refresh_id, parent=None):
+      super(MyCustomWidgetUpdateThread, self).__init__(parent)
+      self._refresh_id = refresh_id
+
+   def run(self):
+      # This function is for the background thread
+      try:
+         # Call the slow operations
+         result = boto3_client.potentially_expensive_api(...)
+         # Only emit the result if it isn't canceled
+         if not self.interruptionRequested():
+            self.update.emit(self._refresh_id, result)
+      except Exception as e:
+         # Use multiple signals for different meanings, such as handling errors.
+         if not self.interruptionRequested():
+            self.background_exception.emit(f"Background thread error", e)
+
+
+class MyCustomWidget(QWidget):
    def __init__(self, ...):
       # Save information about the thread
       self.__refresh_thread = None
       self.__refresh_id = 0
-
-      # Set this to True when exiting
-      self.canceled = False
-
-      # Connect the Signals to handler functions that run on the main thread
-      self.update.connect(self.handle_update)
-      self.background_exception.connect(self.handle_background_exception)
 
     def closeEvent(self, event):
       # Tell background threads when the widget closes
@@ -298,32 +318,18 @@ class MyCustomWidget(QWidget):
          # Do something with result
          self.result_widget.set_message(result)
 
-    def start_the_refresh(self):
-        # This function starts the thread to run in the background
+   def start_the_refresh(self):
+      # This function starts the thread to run in the background
 
-        # Update the GUI state to reflect the update
-        self.result_widget.set_refreshing_status(True)
+      # Update the GUI state to reflect the update
+      self.result_widget.set_refreshing_status(True)
 
-        self.__refresh_id += 1
-        self.__refresh_thread = threading.Thread(
-            target=self._refresh_thread_function,
-            name=f"AWS Deadline Cloud Refresh Thread",
-            args=(self.__refresh_id,),
-        )
-        self.__refresh_thread.start()
-
-   def _refresh_thread_function(self, refresh_id: int):
-      # This function is for the background thread
-      try:
-         # Call the slow operations
-         result = boto3_client.potentially_expensive_api(...)
-         # Only emit the result if it isn't canceled
-         if not self.canceled:
-            self.update.emit(refresh_id, result)
-      except BaseException as e:
-         # Use multiple signals for different meanings, such as handling errors.
-         if not self.canceled:
-            self.background_exception.emit(f"Background thread error", e)
-
+      self.__refresh_id += 1
+      self.__refresh_thread = MyCustomWidgetUpdateThread(self.__refresh_id)
+      # Connect the Signals to handler functions that run on the main thread
+      self.__refresh_thread.update.connect(self.handle_update)
+      self.__refresh_thread.background_exception.connect(self.handle_background_exception)
+      self.destroyed.connect(self.__refresh_thread.requestInterruption)
+      self.__refresh_thread.start()
 ```
 

@@ -21,12 +21,11 @@ The status includes three parts:
      in the AWS profile configuration.
 """
 import os
-import threading
 from configparser import ConfigParser
 from logging import getLogger
 from typing import Optional
 
-from qtpy.QtCore import QObject, QFileSystemWatcher, Signal
+from qtpy.QtCore import QObject, QFileSystemWatcher, Signal, QThread
 
 from .. import api
 from ..config import config_file
@@ -34,6 +33,55 @@ from ..config import config_file
 logger = getLogger(__name__)
 
 _deadline_authentication_status = None
+
+
+class DeadlineCredentialSourceThread(QThread):
+
+    creds_source_changed = Signal(api.AwsCredentialsSource)
+
+    def __init__(self, config, parent=None):
+        super(DeadlineCredentialSourceThread, self).__init__(parent)
+        self._config = config
+
+    def run(self):
+        creds_source = api.get_credentials_source(config=self._config)
+        self.creds_source_changed.emit(creds_source)
+
+
+class DeadlineAuthenticationStatusThread(QThread):
+
+    auth_status_changed = Signal(api.AwsAuthenticationStatus)
+
+    def __init__(self, config, parent=None):
+        super(DeadlineAuthenticationStatusThread, self).__init__(parent)
+        self._config = config
+
+    def run(self):
+        auth_status = None
+        try:
+            auth_status = api.check_authentication_status(config=self._config)
+        except Exception as e:
+            logger.exception(e)
+            auth_status = api.AwsAuthenticationStatus.CONFIGURATION_ERROR
+        self.auth_status_changed.emit(auth_status)
+
+
+class DeadlineApiStatusThread(QThread):
+
+    api_availability_changed = Signal(bool)
+
+    def __init__(self, config, parent=None):
+        super(DeadlineApiStatusThread, self).__init__(parent)
+        self._config = config
+
+    def run(self):
+        api_availability = None
+        try:
+            api_availability = api.check_deadline_api_available(config=self._config)
+        except Exception as e:
+            logger.exception(e)
+            api_availability = False
+        self.api_availability_changed.emit(api_availability)
 
 
 class DeadlineAuthenticationStatus(QObject):
@@ -144,16 +192,24 @@ class DeadlineAuthenticationStatus(QObject):
     def api_availability(self) -> Optional[bool]:
         return self.__api_availability
 
+    def _on_creds_source_changed(self, creds_source):
+        self.__creds_source = creds_source
+        self.creds_source_changed.emit()
+
+    def _on_auth_status_changed(self, auth_status):
+        self.__auth_status = auth_status
+        self.auth_status_changed.emit()
+
+    def _on_api_availability_changed(self, api_availability):
+        self.__api_availability = api_availability
+        self.api_availability_changed.emit()
+
     def files_changed(self, changed_path) -> None:
         # Force the cached boto3 session to refresh, since we don't check the creds
         # file
         if changed_path in self.aws_creds_paths:
             logger.info(f"Path {changed_path} changed, refreshing authentication status")
-            # Send it to another thread to avoid blocking the Qt event loop
-            self.session_thread = threading.Thread(
-                target=self._get_session, kwargs={"changed_path": changed_path}
-            )
-            self.session_thread.start()
+            self._get_session(changed_path)
         else:
             logger.info(f"Path {changed_path} changed, does not affect authentication status")
 
@@ -166,39 +222,18 @@ class DeadlineAuthenticationStatus(QObject):
         elif changed_path in self.deadline_config_paths:
             self.deadline_config_changed.emit()
 
-    def _refresh_creds_source(self) -> None:
-        self.__creds_source = None
-        self.creds_source_changed.emit()
-        self.__creds_source = api.get_credentials_source(config=self.config)
-        self.creds_source_changed.emit()
-
-    def _refresh_auth_status(self) -> None:
-        self.__auth_status = None
-        self.auth_status_changed.emit()
-        try:
-            self.__auth_status = api.check_authentication_status(config=self.config)
-        except BaseException as e:
-            logger.exception(e)
-            self.__auth_status = api.AwsAuthenticationStatus.CONFIGURATION_ERROR
-        self.auth_status_changed.emit()
-
-    def _refresh_api_availability(self) -> None:
-        self.__api_availability = None
-        self.api_availability_changed.emit()
-        try:
-            self.__api_availability = api.check_deadline_api_available(config=self.config)
-        except BaseException as e:
-            logger.exception(e)
-            self.__api_availability = False
-        self.api_availability_changed.emit()
-
     def refresh_status(self) -> None:
         """
         Initiates an asynchronous status refresh.
         """
-        self.__creds_source_thread = threading.Thread(target=self._refresh_creds_source)
+        self.__creds_source_thread = DeadlineCredentialSourceThread(self.config)
+        self.__creds_source_thread.creds_source_changed.connect(self._on_creds_source_changed)
         self.__creds_source_thread.start()
-        self.__auth_status_thread = threading.Thread(target=self._refresh_auth_status)
+        self.__auth_status_thread = DeadlineAuthenticationStatusThread(self.config)
+        self.__auth_status_thread.auth_status_changed.connect(self._on_auth_status_changed)
         self.__auth_status_thread.start()
-        self.__api_availability_thread = threading.Thread(target=self._refresh_api_availability)
+        self.__api_availability_thread = DeadlineApiStatusThread(self.config)
+        self.__api_availability_thread.api_availability_changed.connect(
+            self._on_api_availability_changed
+        )
         self.__api_availability_thread.start()
