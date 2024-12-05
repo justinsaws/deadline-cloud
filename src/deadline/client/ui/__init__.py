@@ -165,36 +165,3 @@ def gui_context_for_cli(automatically_install_dependencies: bool):
         QMessageBox.warning(  # type: ignore[call-overload]
             None, f'Error running "{command}"', f"Exception caught:\n{traceback.format_exc()}"
         )
-
-
-class CancelationFlag:
-    """
-    Helper object for background thread cancelation.
-    The `destroyed` event cannot be connected to a member
-    function of the class. With this object, you can bind it
-    to the cancelation flag's set_canceled method instead.
-
-    Example usage:
-
-    class MyWidget(QWidget):
-        thread_event = Signal(str)
-
-        def __init__(self):
-            self.canceled = CancelationFlag()
-            self.destroyed.connect(self.canceled.set_canceled)
-
-        def _my_thread_function(self):
-            ...<processing>...
-
-            if not self.canceled:
-                self.thread_event.emit(result)
-    """
-
-    def __init__(self):
-        self.canceled = False
-
-    def set_canceled(self):
-        self.canceled = True
-
-    def __bool__(self):
-        return self.canceled
