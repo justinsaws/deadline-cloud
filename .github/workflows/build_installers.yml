@@ -29,10 +29,11 @@ on:
         - release
 
 jobs:
-  BuildInstaller:
-    if: (github.repository == 'aws-deadline/deadline-cloud')
-    name: Build Installer
-    uses: aws-deadline/.github/.github/workflows/reusable_build_installers.yml@mainline
+  BuildDeadlineCloudClientInstaller:
+    if: (github.repository == 'justinsaws/deadline-cloud')
+    name: Build Deadline Cloud Client Installer
+    uses: justinsaws/.github/.github/workflows/reusable_build_installers.yml@mainline
+    secrets: inherit
     permissions:
       contents: read
       id-token: write
