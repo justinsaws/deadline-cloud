@@ -46,8 +46,6 @@ class JobBundleSettingsWidget(QWidget):
     def __init__(self, initial_settings: JobBundleSettings, parent: Optional[QWidget] = None):
         super().__init__(parent=parent)
 
-        self.parent = parent
-
         self.param_layout = QVBoxLayout()
 
         self._build_ui(initial_settings)
@@ -64,7 +62,9 @@ class JobBundleSettingsWidget(QWidget):
         # Clear the layout
         for i in reversed(range(self.param_layout.count())):
             item = self.param_layout.takeAt(i)
-            item.widget().deleteLater()
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
 
         self.parameters_widget = OpenJDParametersWidget(
             parameter_definitions=settings.parameters, parent=self
@@ -114,8 +114,8 @@ class JobBundleSettingsWidget(QWidget):
             logger.warning(msg)
             return
 
-        if self.parent and hasattr(self.parent, "refresh"):
-            self.parent.refresh(
+        if self.parent() and hasattr(self.parent(), "refresh"):
+            self.parent().refresh(
                 job_settings=job_settings,
                 auto_detected_attachments=asset_references,
                 attachments=None,

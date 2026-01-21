@@ -403,4 +403,4 @@ class DeadlineAuthenticationStatusWidget(QGroupBox):
         if any(action.isVisible() for action in self._auth_menu.actions()):
             self._profile_button.setMenu(self._auth_menu)
         else:
-            self._profile_button.setMenu(None)
+            self._profile_button.setMenu(None)  # type: ignore[arg-type]

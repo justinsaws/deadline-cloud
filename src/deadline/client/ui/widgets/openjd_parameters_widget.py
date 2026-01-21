@@ -90,8 +90,9 @@ class OpenJDParametersWidget(QWidget):
         if isinstance(layout, QVBoxLayout):
             for index in reversed(range(layout.count())):
                 child = layout.takeAt(index)
-                if child.widget():
-                    child.widget().deleteLater()
+                widget = child.widget()
+                if widget:
+                    widget.deleteLater()
                 elif child.layout():
                     child.layout().deleteLater()
         else:
