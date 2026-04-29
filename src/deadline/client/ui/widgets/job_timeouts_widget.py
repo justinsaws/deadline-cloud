@@ -12,21 +12,22 @@ from datetime import timedelta
 from qtpy.QtWidgets import (  # type: ignore
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QSpinBox,
     QCheckBox,
-    QGridLayout,
+    QVBoxLayout,
     QWidget,
 )
 from qtpy.QtCore import Signal
 from .._utils import tr
 from ..dataclasses.timeouts import TimeoutTableEntries
 
-# UI Constants
+# UI Constants – use Cloudscape status background tokens
 WARNING_ICON = "⚠️"
 ERROR_ICON = "❌"
-ERROR_BG_COLOR = "#FFE4E1"  # Light red
-WARNING_BG_COLOR = "#FFF3CD"  # Light yellow
+ERROR_BG_COLOR = "#1f0000"  # Cloudscape $color-background-status-error (dark)
+WARNING_BG_COLOR = "#191100"  # Cloudscape $color-background-status-warning (dark)
 
 
 class TimeoutEntryWidget(QWidget):
@@ -69,14 +70,15 @@ class TimeoutEntryWidget(QWidget):
         """
         Builds the internal layout of the timeout row.
         """
-        layout = QGridLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addWidget(self.checkbox, 0, 0)
-        layout.addWidget(self.status_icon, 0, 1)
-        layout.addWidget(self.days_box, 0, 2)
-        layout.addWidget(self.hours_box, 0, 3)
-        layout.addWidget(self.minutes_box, 0, 4)
+        layout.addWidget(self.checkbox)
+        layout.addWidget(self.status_icon)
+        layout.addWidget(self.days_box)
+        layout.addWidget(self.hours_box)
+        layout.addWidget(self.minutes_box)
+        layout.addStretch()
 
     def _connect_signals(self):
         """
@@ -230,19 +232,20 @@ class TimeoutTableWidget(QGroupBox):
         self.layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.timeouts_box = QWidget()
-        timeouts_layout = QGridLayout(self.timeouts_box)
+        timeouts_layout = QVBoxLayout(self.timeouts_box)
+        timeouts_layout.setContentsMargins(0, 0, 0, 0)
 
-        for index, (label, entry) in enumerate(timeouts.entries.items()):
+        for label, entry in timeouts.entries.items():
             timeout_row = TimeoutEntryWidget(label, entry.tooltip)
-            timeouts_layout.addWidget(timeout_row, index, 0, 1, 4)
+            timeouts_layout.addWidget(timeout_row)
             self.timeout_rows[label] = timeout_row
             timeout_row.changed.connect(self._update_ui_state)
 
         self.error_label = self._create_message_label(ERROR_BG_COLOR)
         self.warning_label = self._create_message_label(WARNING_BG_COLOR)
 
-        timeouts_layout.addWidget(self.error_label, len(timeouts.entries), 0, 1, 4)
-        timeouts_layout.addWidget(self.warning_label, len(timeouts.entries) + 1, 0, 1, 4)
+        timeouts_layout.addWidget(self.error_label)
+        timeouts_layout.addWidget(self.warning_label)
 
         self.layout.addRow(self.timeouts_box)
 

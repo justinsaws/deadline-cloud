@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Optional
 
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QColor, QIcon, QPalette
-from qtpy.QtWidgets import QApplication, QFileDialog, QMainWindow, QStyleFactory, QWidget
+from qtpy.QtGui import QColor, QIcon
+from qtpy.QtWidgets import QApplication, QFileDialog, QMainWindow, QWidget
 
 from .. import api
 from .cli_job_submitter import show_cli_job_submitter
+from .cloudscape_theme import apply_cloudscape_theme
 from .dialogs import DeadlineConfigDialog, DeadlineLoginDialog
 from .job_bundle_submitter import show_job_bundle_submitter
 
@@ -92,9 +93,6 @@ class DevMainWindow(QMainWindow):
 def app() -> None:
     app = QApplication(sys.argv)
 
-    # Set the style.
-    app.setStyle(QStyleFactory.create("fusion"))
-
     # Set the application info.
     app.setApplicationName("AWS Deadline Cloud client test GUI")
     app.setOrganizationName("AWS")
@@ -102,46 +100,8 @@ def app() -> None:
     icon = QIcon(str(Path(__file__).parent / "resources" / "deadline_logo.svg"))
     app.setWindowIcon(icon)
 
-    # Apply the stylesheet.
-    pal = QPalette(QColor(64, 64, 64))
-    pal.setColor(QPalette.Highlight, QColor(37, 200, 25))
-    pal.setColor(QPalette.HighlightedText, QColor(0, 0, 0))
-    pal.setColor(QPalette.Link, QColor(96, 185, 250))
-    app.setPalette(pal)
-
-    window = app.palette().color(QPalette.Window)
-    selection = app.palette().color(QPalette.Highlight)
-    app.setStyleSheet(
-        """
-        *{ selection-background-color: rgb("""
-        + str(selection.red())
-        + """, """
-        + str(selection.green())
-        + """, """
-        + str(selection.blue())
-        + """); }
-        QMenu {background-color: rgb("""
-        + str(window.red())
-        + """, """
-        + str(window.green())
-        + """, """
-        + str(window.blue())
-        + """); menu-scrollable: 1;}
-        QToolTip{ color: black;}
-        QDockWidget {titlebar-close-icon: url(:/ThinkboxUI/Bitmaps/Close2_Dark.png);
-                     titlebar-normal-icon: url(:/ThinkboxUI/Bitmaps/Undock2_Dark.png);}
-        QDockWidget::close-button, QDockWidget::float-button {min-width: 18px; min-height: 18px; icon-size: 12px;}
-        QDockWidget::float-button {position: relative; right: 20px; top: 2px;}
-        QDockWidget::close-button {position: relative; right: 1px; top: 2px;}
-        QDockWidget::title { text-align: center;}
-        QDockWidget::title {background: rgb("""
-        + str(max(0, (window.red() - 10)))
-        + """, """
-        + str(max(0, (window.green() - 10)))
-        + """, """
-        + str(max(0, (window.blue() - 10)))
-        + """);}"""
-    )
+    # Apply the Cloudscape-inspired theme (sets Fusion style, palette, and stylesheet).
+    apply_cloudscape_theme(app)
 
     main_window = DevMainWindow()
     main_window.show()

@@ -16,7 +16,6 @@ from qtpy.QtWidgets import (  # type: ignore
     QCheckBox,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
     QSizePolicy,
     QLabel,
     QVBoxLayout,
@@ -25,6 +24,7 @@ from qtpy.QtWidgets import (  # type: ignore
     QMessageBox,
 )
 
+from .styled_buttons import StyledButton as QPushButton  # noqa: N812
 from ...job_bundle.submission import AssetReferences
 from .._utils import block_signals, tr
 
@@ -101,6 +101,7 @@ class JobAttachmentsWidget(QWidget):
         self.input_files_controls.add.clicked.connect(self._add_input_files)
         self.input_files_controls.remove_selected.clicked.connect(self._remove_selected_input_files)
         self.input_files = QListWidget(parent=self)
+        self.input_files.setMinimumHeight(180)
         self.input_files.itemSelectionChanged.connect(self._update_status_messages)
         self.input_files.setSortingEnabled(False)
         self.input_files.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -119,6 +120,7 @@ class JobAttachmentsWidget(QWidget):
             self._remove_selected_input_directories
         )
         self.input_directories = QListWidget(parent=self)
+        self.input_directories.setMinimumHeight(180)
         self.input_directories.itemSelectionChanged.connect(self._update_status_messages)
         self.input_directories.setSortingEnabled(False)
         self.input_directories.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -137,6 +139,7 @@ class JobAttachmentsWidget(QWidget):
             self._remove_selected_output_directories
         )
         self.output_directories = QListWidget(parent=self)
+        self.output_directories.setMinimumHeight(180)
         self.output_directories.itemSelectionChanged.connect(self._update_status_messages)
         self.output_directories.setSortingEnabled(False)
         self.output_directories.setSelectionMode(QAbstractItemView.ExtendedSelection)

@@ -11,21 +11,25 @@ from configparser import ConfigParser
 from typing import Any, List, Optional, TYPE_CHECKING
 
 from qtpy.QtCore import Qt, QSize, Signal
+from qtpy.QtGui import QIcon
 from qtpy.QtWidgets import (
-    QApplication,
     QComboBox,
     QHBoxLayout,
-    QPushButton,
-    QStyle,
     QWidget,
 )
+
+from .styled_buttons import StyledButton
 
 if TYPE_CHECKING:
     from qtpy.QtCore import SignalInstance
 
+from pathlib import Path as _Path
+
 from ...config import config_file
 from .._utils import block_signals
 from ..controllers import DeadlineUIController
+
+_REFRESH_ICON = str(_Path(__file__).parent.parent / "resources" / "refresh.svg")
 
 
 class _DeadlineResourceListComboBoxController(QWidget):
@@ -66,10 +70,11 @@ class _DeadlineResourceListComboBoxController(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.box, stretch=1)
 
-        self.refresh_button = QPushButton("")
+        self.refresh_button = StyledButton("")
         layout.addWidget(self.refresh_button)
-        self.refresh_button.setIcon(QApplication.style().standardIcon(QStyle.SP_BrowserReload))
-        self.refresh_button.setFixedSize(QSize(22, 22))
+        self.refresh_button.setIcon(QIcon(_REFRESH_ICON))
+        self.refresh_button.setIconSize(QSize(14, 14))
+        self.refresh_button.setFixedWidth(36)
         self.refresh_button.clicked.connect(self.refresh_list)
 
     def _connect_controller_signals(self) -> None:

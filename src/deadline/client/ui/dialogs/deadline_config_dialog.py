@@ -26,7 +26,6 @@ from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -118,7 +117,12 @@ class DeadlineConfigDialog(QDialog):
         # Use smaller of content height or max screen percentage
         optimal_height = min(content_height, max_dialog_height)
 
-        return QSize(650, optimal_height)
+        # Width: use the content's preferred width so nothing is clipped horizontally
+        content_width = 650
+        if hasattr(self, "config_box"):
+            content_width = max(content_width, self.config_box.sizeHint().width() + 40)
+
+        return QSize(content_width, optimal_height)
 
     def _build_ui(self):
         self.layout = QVBoxLayout(self)
@@ -130,8 +134,7 @@ class DeadlineConfigDialog(QDialog):
         # Enable widget resizing within scroll area
         self.scrollArea.setWidgetResizable(True)
         self.scrollArea.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.MinimumExpanding)
-        # Hide the scroll area border for a cleaner appearance
-        self.scrollArea.setStyleSheet("QScrollArea { border: none; }")
+        # Scroll area border is handled by the Cloudscape global theme
 
         self.layout.addWidget(self.scrollArea)
 
@@ -146,23 +149,22 @@ class DeadlineConfigDialog(QDialog):
             self.on_auth_status_update
         )
 
-        # We only use a Close button, not OK/Cancel, because we live update the settings.
-        self.button_box = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply,
-            Qt.Horizontal,
-        )
-        self.button_box.button(QDialogButtonBox.Ok).setText(tr("Ok"))
-        self.button_box.button(QDialogButtonBox.Cancel).setText(tr("Cancel"))
-        self.button_box.button(QDialogButtonBox.Apply).setText(tr("Apply"))
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        self.button_box.clicked.connect(self.on_button_box_clicked)
+        # Button bar using styled buttons for consistent rounded appearance
+        from ..widgets.styled_buttons import StyledButtonBox
+
+        self.button_box = StyledButtonBox(self)
+        self._cancel_button = self.button_box.add_button(tr("Cancel"), callback=self.reject)
+        self._apply_button = self.button_box.add_button(tr("Apply"), callback=self._on_apply)
+        self._ok_button = self.button_box.add_button(tr("Ok"), primary=True, callback=self.accept)
         self.auth_status_box.logout_clicked.connect(self.on_logout)
         self.auth_status_box.login_clicked.connect(self.on_login)
         self.layout.addWidget(self.button_box)
 
         # Refresh the lists so queue/farm show the description instead of the ID
         self.config_box.refresh_lists()
+
+        # Ensure the dialog is wide enough for its content
+        self.adjustSize()
 
     @property
     def changes_were_applied(self) -> bool:
@@ -186,13 +188,12 @@ class DeadlineConfigDialog(QDialog):
         self.deadline_authentication_status.refresh_status()
         self.config_box.refresh()
 
-    def on_button_box_clicked(self, button):
-        if self.button_box.standardButton(button) == QDialogButtonBox.Apply:
-            self.config_box.apply()
+    def _on_apply(self):
+        self.config_box.apply()
 
     def on_refresh(self):
         # Enable the "Apply" button only if there are changes
-        self.button_box.button(QDialogButtonBox.Apply).setEnabled(bool(self.config_box.changes))
+        self._apply_button.setEnabled(bool(self.config_box.changes))
         # Update the auth status with the refreshed config
         self.deadline_authentication_status.set_config(self.config_box.config)
 
@@ -208,9 +209,9 @@ class DeadlineConfigDialog(QDialog):
 class DeadlineScrollArea(QScrollArea):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-
-    def sizeHint(self):
-        return QSize(500, 400)
+        # Only scroll vertically — the content should fill the available width.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
 
 class DeadlineWorkstationConfigWidget(QWidget):
@@ -247,9 +248,6 @@ class DeadlineWorkstationConfigWidget(QWidget):
         self._fill_aws_profiles_box()
         self.refresh()
 
-    def minimumSizeHint(self):
-        return QSize(500, 700)
-
     def _build_ui(self):
         # Ensure the widget expands horizontally
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -262,23 +260,13 @@ class DeadlineWorkstationConfigWidget(QWidget):
         self.v_layout.setContentsMargins(10, 10, 10, 10)  # 10px margins around content
 
         # Simplified stylesheet - focus only on title positioning, use layout for spacing
-        GROUP_BOX_STYLE_SHEET = """
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            padding-left: 5px;
-            top: 0px;
-        }
-        QGroupBox {
-            margin-top: 20px;
-        }
-        """
+        # NOTE: QGroupBox styling is provided by the Cloudscape global theme.
 
         self.labels = {}
         self._refresh_callbacks: List[Callable] = []
 
         # Global settings
         self.global_settings_group = QGroupBox(parent=self, title=tr("Global settings"))
-        self.global_settings_group.setStyleSheet(GROUP_BOX_STYLE_SHEET)
         self.global_settings_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.v_layout.addWidget(self.global_settings_group)
         global_settings_layout = QFormLayout(self.global_settings_group)
@@ -286,7 +274,6 @@ class DeadlineWorkstationConfigWidget(QWidget):
 
         # AWS Profile-specific settings
         self.profile_settings_group = QGroupBox(parent=self, title=tr("Profile settings"))
-        self.profile_settings_group.setStyleSheet(GROUP_BOX_STYLE_SHEET)
         self.profile_settings_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.v_layout.addWidget(self.profile_settings_group)
         profile_settings_layout = QFormLayout(self.profile_settings_group)
@@ -294,7 +281,6 @@ class DeadlineWorkstationConfigWidget(QWidget):
 
         # Farm-specific settings
         self.farm_settings_group = QGroupBox(parent=self, title=tr("Farm settings"))
-        self.farm_settings_group.setStyleSheet(GROUP_BOX_STYLE_SHEET)
         self.farm_settings_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.v_layout.addWidget(self.farm_settings_group)
         farm_settings_layout = QFormLayout(self.farm_settings_group)
@@ -302,7 +288,6 @@ class DeadlineWorkstationConfigWidget(QWidget):
 
         # General settings
         self.general_settings_group = QGroupBox(parent=self, title=tr("General settings"))
-        self.general_settings_group.setStyleSheet(GROUP_BOX_STYLE_SHEET)
         self.general_settings_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.v_layout.addWidget(self.general_settings_group)
         general_settings_layout = QFormLayout(self.general_settings_group)
@@ -314,7 +299,7 @@ class DeadlineWorkstationConfigWidget(QWidget):
         self._background_exception.connect(self.handle_background_exception)
 
     def _build_global_settings_ui(self, group, layout):
-        layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.aws_profiles_box = QComboBox(parent=group)
         aws_profile_label = self.labels["defaults.aws_profile_name"] = QLabel(tr("AWS profile"))
@@ -322,7 +307,7 @@ class DeadlineWorkstationConfigWidget(QWidget):
         self.aws_profiles_box.currentTextChanged.connect(self.aws_profile_changed)
 
     def _build_profile_settings_ui(self, group, layout):
-        layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.job_history_dir_edit = DirectoryPickerWidget(
             initial_directory="",
@@ -343,7 +328,7 @@ class DeadlineWorkstationConfigWidget(QWidget):
         layout.addRow(default_farm_box_label, self.default_farm_box)
 
     def _build_farm_settings_ui(self, group, layout):
-        layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.default_queue_box = DeadlineQueueListComboBoxController(parent=group)
         default_queue_box_label = self.labels["defaults.queue_id"] = QLabel(tr("Default queue"))
@@ -394,7 +379,7 @@ class DeadlineWorkstationConfigWidget(QWidget):
         )
 
     def _build_general_settings_ui(self, group, layout):
-        layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.auto_accept = self._init_checkbox_setting(
             group, layout, "settings.auto_accept", tr("Auto accept prompt defaults")
@@ -497,7 +482,7 @@ class DeadlineWorkstationConfigWidget(QWidget):
         self.labels["settings.known_asset_paths"] = known_paths_label
 
         known_paths_widget = QWidget(parent=group)
-        known_paths_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
+        known_paths_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         known_paths_layout = QVBoxLayout(known_paths_widget)
         known_paths_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -559,9 +544,9 @@ class DeadlineWorkstationConfigWidget(QWidget):
         Returns:
             QCheckBox: The created checkbox.
         """
-        checkbox = QCheckBox(parent=group)
-        label = self.labels[setting_name] = QLabel(label_text)
-        layout.addRow(label, checkbox)
+        checkbox = QCheckBox(label_text, parent=group)
+        self.labels[setting_name] = checkbox
+        layout.addRow(checkbox)
 
         def refresh_checkbox():
             """Function that refreshes the state of the checkbox based on the setting name"""
@@ -700,14 +685,14 @@ class DeadlineWorkstationConfigWidget(QWidget):
 
         combo_box = QComboBox(parent=group)
 
-        row_layout = QHBoxLayout()
-        row_layout.addWidget(label)
-        row_layout.addWidget(icon_label)
-        row_layout.addWidget(combo_box)
-        row_layout.setStretchFactor(combo_box, 1)
-        row_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        label_row = QWidget()
+        label_layout = QHBoxLayout(label_row)
+        label_layout.setContentsMargins(0, 0, 0, 0)
+        label_layout.addWidget(label)
+        label_layout.addWidget(icon_label)
+        label_layout.addStretch()
 
-        layout.addRow(row_layout)
+        layout.addRow(label_row, combo_box)
 
         for index, (value, tooltip) in enumerate(values_with_tooltips.items()):
             combo_box.addItem(value)
@@ -857,10 +842,10 @@ class DeadlineWorkstationConfigWidget(QWidget):
         self.default_queue_box.refresh_selected_id()
         self.default_storage_profile_box.refresh_selected_id()
 
-        # Put an orange box around the labels for any settings that are changed
+        # Put an accent border around the labels for any settings that are changed
         for setting_name, label in self.labels.items():
             if setting_name in self.changes:
-                label.setStyleSheet("border: 1px solid orange;")
+                label.setStyleSheet("border: 1px solid #ff9900;")
             else:
                 label.setStyleSheet("")
 

@@ -3,18 +3,22 @@
 __all__ = ["InputFilePickerWidget", "OutputFilePickerWidget", "DirectoryPickerWidget"]
 
 import os
+from pathlib import Path
 from typing import Optional
 
-from qtpy.QtCore import Signal
+from qtpy.QtCore import QSize, Signal
+from qtpy.QtGui import QIcon
 from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
     QFileDialog,
     QHBoxLayout,
     QLineEdit,
-    QPushButton,
     QWidget,
 )
 
-from .._utils import block_signals, tr
+from .styled_buttons import StyledButton
+from .._utils import block_signals
+
+_FOLDER_ICON = str(Path(__file__).parent.parent / "resources" / "folder_open.svg")
 
 
 class _FileWidget(QWidget):
@@ -44,8 +48,10 @@ class _FileWidget(QWidget):
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.filename_edit)
-        self.choose_file_button = QPushButton(tr("..."))
-        self.choose_file_button.setFixedSize(30, 22)
+        self.choose_file_button = StyledButton()
+        self.choose_file_button.setIcon(QIcon(_FOLDER_ICON))
+        self.choose_file_button.setIconSize(QSize(16, 14))
+        self.choose_file_button.setFixedWidth(36)
         layout.addWidget(self.choose_file_button)
         self.filename_edit.editingFinished.connect(self.on_filename_edited)
         self.choose_file_button.clicked.connect(self.on_choose_file)
@@ -218,8 +224,10 @@ class DirectoryPickerWidget(QWidget):
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.directory_edit)
-        self.choose_directory_button = QPushButton("...")
-        self.choose_directory_button.setFixedSize(30, 22)
+        self.choose_directory_button = StyledButton()
+        self.choose_directory_button.setIcon(QIcon(_FOLDER_ICON))
+        self.choose_directory_button.setIconSize(QSize(16, 14))
+        self.choose_directory_button.setFixedWidth(36)
         layout.addWidget(self.choose_directory_button)
         self.directory_edit.editingFinished.connect(self.on_directory_edited)
         self.choose_directory_button.clicked.connect(self.on_choose_directory)

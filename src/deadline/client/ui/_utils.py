@@ -203,6 +203,11 @@ def gui_context_for_cli(automatically_install_dependencies: bool):
         icon = QIcon(str(Path(__file__).parent.parent / "ui" / "resources" / "deadline_logo.svg"))
         app.setWindowIcon(icon)
 
+        # Apply the Cloudscape-inspired theme (Fusion style, palette, and stylesheet)
+        from .cloudscape_theme import apply_cloudscape_theme
+
+        apply_cloudscape_theme(app)
+
         yield app
     except DeadlineOperationError as e:
         import os

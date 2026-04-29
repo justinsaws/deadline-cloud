@@ -24,12 +24,9 @@ from qtpy.QtCore import Qt  # pylint: disable=import-error
 
 from .._utils import tr
 from ...config import config_file
+from ..cloudscape_theme import COLOR_PRIMARY, COLOR_PRIMARY_HOVER
 
 logger = logging.getLogger(__name__)
-
-# AWS brand colors used for accent elements
-_COLOR_ACCENT = "#ec7211"
-_COLOR_ACCENT_HOVER = "#f59942"
 
 
 class UpdateAvailableDialog(QDialog):
@@ -122,9 +119,9 @@ class UpdateAvailableDialog(QDialog):
             self.release_notes_button.setFlat(True)
             self.release_notes_button.setCursor(Qt.PointingHandCursor)
             self.release_notes_button.setStyleSheet(
-                f"QPushButton {{ color: {_COLOR_ACCENT}; text-decoration: underline;"
+                f"QPushButton {{ color: {COLOR_PRIMARY}; text-decoration: underline;"
                 f" border: none; background: transparent; padding: 0; text-align: left; }}"
-                f"QPushButton:hover {{ color: {_COLOR_ACCENT_HOVER}; }}"
+                f"QPushButton:hover {{ color: {COLOR_PRIMARY_HOVER}; }}"
             )
             self.release_notes_button.clicked.connect(self._on_release_notes_clicked)
             layout.addWidget(self.release_notes_button, alignment=Qt.AlignLeft)
@@ -132,23 +129,18 @@ class UpdateAvailableDialog(QDialog):
         # Add spacing before buttons
         layout.addSpacing(12)
 
-        # Manual button layout for consistent ordering across platforms
-        _button_base = "border: 1px solid #888; border-radius: 6px; padding: 3px 12px;"
-
+        # Buttons inherit styling from the Cloudscape theme stylesheet.
+        # The download button uses the primary (amber) variant.
         self.dont_remind_button = QPushButton(tr("Don't remind me again"))
-        self.dont_remind_button.setStyleSheet(f"QPushButton {{ {_button_base} }}")
         self.dont_remind_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.dont_remind_button.clicked.connect(self._on_dont_remind_clicked)
 
         self.dismiss_button = QPushButton(tr("Dismiss"))
-        self.dismiss_button.setStyleSheet(f"QPushButton {{ {_button_base} }}")
         self.dismiss_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.dismiss_button.clicked.connect(self.accept)
 
         self.download_button = QPushButton(tr("Download installer"))
-        self.download_button.setStyleSheet(
-            f"QPushButton {{ {_button_base} background-color: {_COLOR_ACCENT}; color: white; }}"
-        )
+        self.download_button.setProperty("cssClass", "primary")
         self.download_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.download_button.clicked.connect(self._on_download_clicked)
 

@@ -13,21 +13,18 @@ from typing import Any, Dict, Optional, Protocol
 import yaml
 
 from qtpy.QtCore import QSize, Qt  # pylint: disable=import-error
-from qtpy.QtGui import QKeyEvent  # pylint: disable=import-error
+from qtpy.QtGui import QKeyEvent, QShowEvent  # pylint: disable=import-error
 from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
-    QApplication,
     QDialog,
-    QDialogButtonBox,
-    QFormLayout,
+    QHBoxLayout,
     QMessageBox,
-    QPushButton,
     QScrollArea,
-    QTabWidget,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from .submit_job_progress_dialog import SubmitJobProgressDialog
+from .submit_job_progress_dialog import SubmitJobProgressDialog  # noqa: F401 – kept for backward compat
 
 from ..dataclasses import HostRequirements
 from ...dataclasses import SubmitterInfo
@@ -40,10 +37,10 @@ from ...exceptions import UserInitiatedCancel, NonValidInputError
 from ...job_bundle import create_job_history_bundle_dir
 from ...job_bundle.parameters import JobParameter
 from ...job_bundle.submission import AssetReferences
-from ..widgets.deadline_authentication_status_widget import DeadlineAuthenticationStatusWidget
 from ..widgets.job_attachments_tab import JobAttachmentsWidget
 from ..widgets.shared_job_settings_tab import SharedJobSettingsWidget
 from ..widgets.host_requirements_tab import HostRequirementsWidget
+from ..widgets.side_navigation_panel import SideNavigationPanel
 from . import DeadlineConfigDialog, DeadlineLoginDialog
 from ._types import JobBundlePurpose
 from ._help_dialog import _HelpDialog
@@ -175,6 +172,28 @@ class SubmitJobToDeadlineDialog(QDialog):
     def sizeHint(self):
         return QSize(540, 700)
 
+    def showEvent(self, event: QShowEvent) -> None:
+        """Ensure the dialog is wide enough for the widest page content + side nav."""
+        super().showEvent(event)
+        if hasattr(self, "pages") and hasattr(self, "side_nav"):
+            max_content_width = 0
+            for i in range(self.pages.count()):
+                scroll_area = self.pages.widget(i)
+                if scroll_area and isinstance(scroll_area, QScrollArea) and scroll_area.widget():
+                    inner = scroll_area.widget()
+                    if inner is not None:
+                        w = max(inner.sizeHint().width(), inner.minimumSizeHint().width())
+                        # Account for scrollbar width + scroll area margins
+                        scrollbar_w = scroll_area.verticalScrollBar().sizeHint().width()
+                        w += scrollbar_w + 4
+                        max_content_width = max(max_content_width, w)
+            nav_width = self.side_nav.width()
+            needed = nav_width + max_content_width + 16
+            if needed > self.width():
+                self.resize(needed, self.height())
+            if needed > self.minimumWidth():
+                self.setMinimumWidth(needed)
+
     def refresh(
         self,
         *,
@@ -206,26 +225,88 @@ class SubmitJobToDeadlineDialog(QDialog):
         host_requirements: Optional[HostRequirements],
     ):
         self.lyt = QVBoxLayout(self)
-        self.lyt.setContentsMargins(5, 5, 5, 5)
+        self.lyt.setContentsMargins(0, 0, 0, 0)
+        self.lyt.setSpacing(0)
 
-        man_layout = QFormLayout()
-        self.lyt.addLayout(man_layout)
-        self.tabs = QTabWidget()
-        self.lyt.addWidget(self.tabs)
+        # --- Main area: side nav + stacked content ---
+        main_area = QHBoxLayout()
+        main_area.setContentsMargins(0, 0, 0, 0)
+        main_area.setSpacing(0)
 
-        self._build_shared_job_settings_tab(initial_job_settings, initial_shared_parameter_values)
-        self._build_job_settings_tab(job_setup_widget_type, initial_job_settings)
-        self._build_job_attachments_tab(auto_detected_attachments, attachments)
+        # Side navigation panel
+        self.side_nav = SideNavigationPanel(self)
+        main_area.addWidget(self.side_nav)
 
-        # Show host requirements only if requested by the constructor
+        # --- Resource selectors in the side nav ---
+        from ..widgets.nav_resource_selector import (
+            NavFarmComboBox,
+            NavQueueComboBox,
+            NavStorageProfileComboBox,
+        )
+
+        self._farm_selector = NavFarmComboBox(self.side_nav)
+        self.side_nav.add_resource_selector(self._farm_selector)
+
+        self._queue_selector = NavQueueComboBox(self.side_nav)
+        self.side_nav.add_resource_selector(self._queue_selector)
+
+        self._storage_selector = NavStorageProfileComboBox(self.side_nav)
+        self.side_nav.add_resource_selector(self._storage_selector)
+
+        # Refresh the dialog when a resource selection changes
+        self._farm_selector.selection_changed.connect(lambda _: self.refresh_deadline_settings())
+        self._queue_selector.selection_changed.connect(lambda _: self.refresh_deadline_settings())
+        self._storage_selector.selection_changed.connect(lambda _: self.refresh_deadline_settings())
+
+        # Right side: stacked content + bottom button bar
+        right_side = QVBoxLayout()
+        right_side.setContentsMargins(0, 0, 0, 0)
+        right_side.setSpacing(0)
+
+        # Banner notification area (above content)
+        from ..widgets.banner_widget import BannerStack
+
+        self.banner = BannerStack(self)
+        right_side.addWidget(self.banner)
+
+        # Stacked widget replaces QTabWidget
+        self.pages = QStackedWidget()
+        right_side.addWidget(self.pages, stretch=1)
+
+        main_area.addLayout(right_side, stretch=1)
+
+        self.lyt.addLayout(main_area, stretch=1)
+
+        # Build pages (order matters – matches nav button indices)
+        self._build_shared_job_settings_page(initial_job_settings, initial_shared_parameter_values)
+        self._build_job_settings_page(job_setup_widget_type, initial_job_settings)
+        self._build_job_attachments_page(auto_detected_attachments, attachments)
+
         if self.show_host_requirements_tab:
-            self._build_host_requirements_tab(host_requirements)
+            self._build_host_requirements_page(host_requirements)
 
-        self.auth_status_box = DeadlineAuthenticationStatusWidget(self)
-        self.auth_status_box.switch_profile_clicked.connect(self.on_switch_profile_clicked)
-        self.auth_status_box.logout_clicked.connect(self.on_logout)
-        self.auth_status_box.login_clicked.connect(self.on_login)
-        self.lyt.addWidget(self.auth_status_box)
+        # Settings page (inline, replaces the separate dialog)
+        self._build_settings_page()
+
+        # Connect nav to stacked widget
+        self.side_nav.page_changed.connect(self.pages.setCurrentIndex)
+
+        # --- Footer buttons in the side nav ---
+        self.side_nav.add_footer_button("gear.svg", tr("Settings..."), self._navigate_to_settings)
+        self.side_nav.add_footer_button("nav_help.svg", tr("Help"), self._on_help_button_clicked)
+
+        # Auth status in the side nav footer
+        from ..widgets.nav_auth_widget import NavAuthWidget
+
+        self._nav_auth = NavAuthWidget(self)
+        self._nav_auth.login_clicked.connect(self.on_login)
+        self._nav_auth.logout_clicked.connect(self.on_logout)
+        self._nav_auth.switch_profile_clicked.connect(self.on_switch_profile_clicked)
+        self.side_nav.add_footer_widget(self._nav_auth)
+        self.side_nav._resource_selectors.append(self._nav_auth)  # expand/collapse with nav
+
+        # Keep the old auth status object for API availability tracking
+        self.auth_status_box = self._nav_auth  # type: ignore[assignment]
         self.deadline_authentication_status.api_availability_changed.connect(
             self.refresh_deadline_settings
         )
@@ -233,25 +314,22 @@ class SubmitJobToDeadlineDialog(QDialog):
         # Refresh the submit button enable state once queue parameter status changes
         self.shared_job_settings.valid_parameters.connect(self._set_submit_button_state)
 
-        self.button_box = QDialogButtonBox(Qt.Horizontal)
-        self.settings_button = QPushButton(tr("Settings..."))
-        self.settings_button.clicked.connect(self.on_settings_button_clicked)
-        self.button_box.addButton(self.settings_button, QDialogButtonBox.ResetRole)
-        self.help_button = QPushButton(tr("Help"))
-        self.help_button.clicked.connect(self._on_help_button_clicked)
-        self.button_box.addButton(self.help_button, QDialogButtonBox.HelpRole)
-        self.submit_button = QPushButton(tr("Submit"))
-        self.submit_button.clicked.connect(self.on_submit)
-        self.button_box.addButton(self.submit_button, QDialogButtonBox.AcceptRole)
-        if hasattr(initial_job_settings, "browse_enabled") and initial_job_settings.browse_enabled:
-            self.load_bundle_button = QPushButton(tr("Load Bundle"))
-            self.load_bundle_button.clicked.connect(self._on_load_bundle)
-            self.button_box.addButton(self.load_bundle_button, QDialogButtonBox.AcceptRole)
-        self.export_bundle_button = QPushButton(tr("Export bundle"))
-        self.export_bundle_button.clicked.connect(self.on_export_bundle)
-        self.button_box.addButton(self.export_bundle_button, QDialogButtonBox.AcceptRole)
+        # --- Bottom button bar (always visible) ---
+        from ..widgets.styled_buttons import StyledButtonBox
 
-        self.lyt.addWidget(self.button_box)
+        self.button_box = StyledButtonBox(self)
+        if hasattr(initial_job_settings, "browse_enabled") and initial_job_settings.browse_enabled:
+            self.load_bundle_button = self.button_box.add_button(
+                tr("Load Bundle"), primary=True, callback=self._on_load_bundle
+            )
+        self.export_bundle_button = self.button_box.add_button(
+            tr("Export bundle"), primary=True, callback=self.on_export_bundle
+        )
+        self.submit_button = self.button_box.add_button(
+            tr("Submit"), primary=True, callback=self.on_submit
+        )
+
+        right_side.addWidget(self.button_box)
 
     def _set_submit_button_state(self):
         # Enable/disable the Submit button based on whether the
@@ -303,6 +381,96 @@ class SubmitJobToDeadlineDialog(QDialog):
         # If necessary, this reloads the queue parameters
         self.shared_job_settings.refresh_queue_parameters()
 
+        # Refresh resource selectors in the side nav
+        self._refresh_resource_selectors()
+
+        # Update banner with auth status
+        self._update_auth_banner()
+
+    def _refresh_resource_selectors(self) -> None:
+        """Refresh the side nav resource selectors from current config."""
+        self._farm_selector.refresh_selected_id()
+        self._queue_selector.refresh_selected_id()
+        self._storage_selector.refresh_selected_id()
+
+        # Trigger async data loading if API is available
+        if self.deadline_authentication_status.api_availability:
+            self._farm_selector.refresh_list()
+            self._queue_selector.refresh_list()
+            self._storage_selector.refresh_list()
+
+    def _update_auth_banner(self) -> None:
+        """Show or remove auth-related banner notifications based on current status."""
+        from ..widgets.banner_widget import BannerAction, BannerItem
+
+        auth_status = self.deadline_authentication_status
+
+        # Don't show banners while the initial auth check is still in progress
+        if auth_status.api_availability is None:
+            return
+
+        api_available = auth_status.api_availability is True
+        farm_configured = get_setting("defaults.farm_id") != ""
+        queue_configured = get_setting("defaults.queue_id") != ""
+
+        if not api_available:
+            # Auth error — not dismissible, with action buttons
+            actions = []
+            if hasattr(auth_status, "auth_status"):
+                from ...api import AwsAuthenticationStatus
+
+                if auth_status.auth_status == AwsAuthenticationStatus.NEEDS_LOGIN:
+                    actions.append(BannerAction("Log in", self.on_login))
+            actions.append(BannerAction("Switch profile", self.on_switch_profile_clicked))
+
+            self.banner.put(
+                "auth-status",
+                BannerItem(
+                    item_id="auth-status",
+                    banner_type="error",
+                    header=tr(
+                        "AWS Deadline Cloud API is not accessible. Check your authentication status."
+                    ),
+                    dismissible=False,
+                    actions=actions,
+                ),
+            )
+        else:
+            self.banner.remove("auth-status")
+
+        # Config warnings
+        if api_available and not farm_configured:
+            self.banner.put(
+                "no-farm",
+                BannerItem(
+                    item_id="no-farm",
+                    banner_type="warning",
+                    header=tr(
+                        "No farm is configured. Click Settings to select a farm for job submission."
+                    ),
+                    dismissible=False,
+                    actions=[BannerAction("Settings...", self.on_settings_button_clicked)],
+                ),
+            )
+        else:
+            self.banner.remove("no-farm")
+
+        if api_available and farm_configured and not queue_configured:
+            self.banner.put(
+                "no-queue",
+                BannerItem(
+                    item_id="no-queue",
+                    banner_type="warning",
+                    header=tr(
+                        "No queue is configured. Click Settings to select a queue within your farm."
+                    ),
+                    dismissible=False,
+                    actions=[BannerAction("Settings...", self.on_settings_button_clicked)],
+                ),
+            )
+        else:
+            self.banner.remove("no-queue")
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """
         Override to capture any enter/return key presses so that the Submit
@@ -312,9 +480,14 @@ class SubmitJobToDeadlineDialog(QDialog):
             return
         super().keyPressEvent(event)
 
-    def _build_shared_job_settings_tab(self, initial_job_settings, initial_shared_parameter_values):
+    def _build_shared_job_settings_page(
+        self, initial_job_settings, initial_shared_parameter_values
+    ):
         self.shared_job_settings_tab = QScrollArea()
-        self.tabs.addTab(self.shared_job_settings_tab, tr("Shared job settings"))
+        self.shared_job_settings_tab.setWidgetResizable(True)
+        self.shared_job_settings_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pages.addWidget(self.shared_job_settings_tab)
+        self.side_nav.add_page("nav_shared_settings.svg", tr("Shared job settings"))
         self.shared_job_settings = SharedJobSettingsWidget(
             initial_settings=initial_job_settings,
             initial_shared_parameter_values=initial_shared_parameter_values,
@@ -322,13 +495,14 @@ class SubmitJobToDeadlineDialog(QDialog):
         )
         self.shared_job_settings.parameter_changed.connect(self.on_shared_job_parameter_changed)
         self.shared_job_settings_tab.setWidget(self.shared_job_settings)
-        self.shared_job_settings_tab.setWidgetResizable(True)
         self.shared_job_settings.parameter_changed.connect(self.on_shared_job_parameter_changed)
 
-    def _build_job_settings_tab(self, job_setup_widget_type, initial_job_settings):
+    def _build_job_settings_page(self, job_setup_widget_type, initial_job_settings):
         self.job_settings_tab = QScrollArea()
-        self.tabs.addTab(self.job_settings_tab, tr("Job-specific settings"))
         self.job_settings_tab.setWidgetResizable(True)
+        self.job_settings_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pages.addWidget(self.job_settings_tab)
+        self.side_nav.add_page("nav_job_specific.svg", tr("Job-specific settings"))
 
         self.job_settings = job_setup_widget_type(
             initial_settings=initial_job_settings, parent=self
@@ -337,25 +511,77 @@ class SubmitJobToDeadlineDialog(QDialog):
         if hasattr(self.job_settings, "parameter_changed"):
             self.job_settings.parameter_changed.connect(self.on_job_template_parameter_changed)
 
-    def _build_job_attachments_tab(
+    def _build_job_attachments_page(
         self, auto_detected_attachments: AssetReferences, attachments: AssetReferences
     ):
         self.job_attachments_tab = QScrollArea()
-        self.tabs.addTab(self.job_attachments_tab, tr("Job attachments"))
+        self.job_attachments_tab.setWidgetResizable(True)
+        self.job_attachments_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pages.addWidget(self.job_attachments_tab)
+        self.side_nav.add_page("nav_attachments.svg", tr("Job attachments"))
         self.job_attachments = JobAttachmentsWidget(
             auto_detected_attachments, attachments, parent=self
         )
         self.job_attachments_tab.setWidget(self.job_attachments)
-        self.job_attachments_tab.setWidgetResizable(True)
 
-    def _build_host_requirements_tab(self, host_requirements: Optional[HostRequirements]):
+    def _build_host_requirements_page(self, host_requirements: Optional[HostRequirements]):
         self.host_requirements = HostRequirementsWidget()
         self.host_requirements_tab = QScrollArea()
-        self.tabs.addTab(self.host_requirements_tab, tr("Host requirements"))
-        self.host_requirements_tab.setWidget(self.host_requirements)
         self.host_requirements_tab.setWidgetResizable(True)
+        self.host_requirements_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pages.addWidget(self.host_requirements_tab)
+        self.side_nav.add_page("nav_host_requirements.svg", tr("Host requirements"))
+        self.host_requirements_tab.setWidget(self.host_requirements)
         if host_requirements:
             self.host_requirements.set_requirements(host_requirements)
+
+    def _build_settings_page(self):
+        """Build the inline settings page using DeadlineWorkstationConfigWidget."""
+        from .deadline_config_dialog import DeadlineWorkstationConfigWidget
+        from ..widgets.styled_buttons import StyledButton
+
+        # Container for scroll area + apply button
+        settings_container = QWidget()
+        settings_layout = QVBoxLayout(settings_container)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(0)
+
+        self.settings_tab = QScrollArea()
+        self.settings_tab.setWidgetResizable(True)
+        self.settings_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_layout.addWidget(self.settings_tab, stretch=1)
+
+        # Apply button bar
+        apply_bar = QHBoxLayout()
+        apply_bar.setContentsMargins(8, 8, 8, 8)
+        apply_bar.addStretch()
+        self._settings_apply_btn = StyledButton(tr("Apply"))
+        self._settings_apply_btn.clicked.connect(self._apply_settings)
+        apply_bar.addWidget(self._settings_apply_btn)
+        settings_layout.addLayout(apply_bar)
+
+        self._settings_page_index = self.pages.count()
+        self.pages.addWidget(settings_container)
+        # Don't add to page nav buttons — settings is accessed via the footer gear icon
+
+        self._config_widget = DeadlineWorkstationConfigWidget(parent=self)
+        self.settings_tab.setWidget(self._config_widget)
+
+        # Refresh the lists so farm/queue show names instead of IDs
+        self._config_widget.refresh_lists()
+
+    def _apply_settings(self) -> None:
+        """Apply pending settings changes and refresh the dialog."""
+        if self._config_widget.changes:
+            self._config_widget.apply()
+            self.refresh_deadline_settings()
+
+    def _navigate_to_settings(self) -> None:
+        """Switch to the settings page in the side nav."""
+        if hasattr(self, "_settings_page_index"):
+            self.pages.setCurrentIndex(self._settings_page_index)
+            # Update nav button selection
+            self.side_nav._on_nav_clicked(self._settings_page_index)
 
     def on_shared_job_parameter_changed(self, parameter: dict[str, Any]):
         """
@@ -408,8 +634,7 @@ class SubmitJobToDeadlineDialog(QDialog):
             self.refresh_deadline_settings()
 
     def on_settings_button_clicked(self):
-        if DeadlineConfigDialog.configure_settings(parent=self):
-            self.refresh_deadline_settings()
+        self._navigate_to_settings()
 
     def _on_help_button_clicked(self):
         """Show the Help dialog with submitter information."""
@@ -540,27 +765,23 @@ class SubmitJobToDeadlineDialog(QDialog):
 
     def on_submit(self):
         """
-        Perform a submission when the submit button is pressed
+        Perform a submission when the submit button is pressed.
+        Progress is shown in the banner instead of a modal dialog.
         """
+        from ._banner_submission import BannerSubmissionHandler
+        from ..widgets.banner_widget import BannerItem
+
         # Retrieve all the settings into the dataclass
         settings = self.job_settings_type()
         self.shared_job_settings.update_settings(settings)
         self.job_settings.update_settings(settings)
 
         queue_parameters = self.shared_job_settings.get_parameters()
-
         asset_references = self.job_attachments.get_asset_references()
 
-        job_progress_dialog = SubmitJobProgressDialog(parent=self)
-        job_progress_dialog.submission_thread_succeeded.connect(
-            self._submission_succeeded_signal_receiver
-        )
-        job_progress_dialog.progress_window_closed.connect(self._close_event_receiver)
-        job_progress_dialog.setModal(True)
-        job_progress_dialog.show()
-        QApplication.instance().processEvents()  # type: ignore[union-attr]
+        # Disable submit button during submission
+        self.submit_button.setEnabled(False)
 
-        # Submit the job
         try:
             self.job_history_bundle_dir = create_job_history_bundle_dir(
                 self.submitter_info.submitter_name, settings.name
@@ -578,7 +799,6 @@ class SubmitJobToDeadlineDialog(QDialog):
                     purpose=JobBundlePurpose.SUBMISSION,
                 )
             else:
-                # Maintaining backward compatibility for submitters that do not support host_requirements yet
                 parameters_from_callback = self.on_create_job_bundle_callback(
                     self,
                     self.job_history_bundle_dir,
@@ -590,13 +810,14 @@ class SubmitJobToDeadlineDialog(QDialog):
             if parameters_from_callback is None:
                 parameters_from_callback = {}
 
-            # If the callback returned job parameters, update them in the job bundle as well so that
-            # submission from the job history dir is equivalent.
             job_parameters = parameters_from_callback.get("job_parameters", [])
             if job_parameters:
                 self.save_job_parameters_to_job_bundle(self.job_history_bundle_dir, job_parameters)
 
-            job_progress_dialog.start_job_submission(
+            # Start non-modal submission via banner
+            self._submission_handler = BannerSubmissionHandler(self.banner, self)
+            self._submission_handler.on_succeeded = self._on_banner_submission_succeeded
+            self._submission_handler.start(
                 job_bundle_dir=self.job_history_bundle_dir,
                 submitter_name=self.submitter_info.submitter_name,
                 config=config_file.read_config(),
@@ -608,17 +829,28 @@ class SubmitJobToDeadlineDialog(QDialog):
 
         except UserInitiatedCancel as uic:
             logger.info("Canceling submission.")
-            QMessageBox.information(
-                self,
-                tr("{submitter} job submission").format(
-                    submitter=self.submitter_info.submitter_name
+            self.submit_button.setEnabled(True)
+            self.banner.put(
+                "submit-cancel",
+                BannerItem(
+                    item_id="submit-cancel",
+                    banner_type="warning",
+                    header=str(uic),
+                    dismissible=True,
                 ),
-                str(uic),
             )
-            job_progress_dialog.close()
         except NonValidInputError as nvie:
-            QMessageBox.critical(self, tr("Non valid inputs detected"), str(nvie))
-            job_progress_dialog.close()
+            self.submit_button.setEnabled(True)
+            self.banner.put(
+                "submit-error",
+                BannerItem(
+                    item_id="submit-error",
+                    banner_type="error",
+                    header=tr("Non valid inputs detected"),
+                    body=str(nvie),
+                    dismissible=True,
+                ),
+            )
         except Exception as exc:
             logger.exception("error submitting job")
             api.get_deadline_cloud_library_telemetry_client().record_error(
@@ -626,11 +858,19 @@ class SubmitJobToDeadlineDialog(QDialog):
                 exception_type=str(type(exc)),
                 from_gui=True,
             )
-            QMessageBox.critical(
-                self,
-                tr("{submitter} job submission").format(
-                    submitter=self.submitter_info.submitter_name
+            self.submit_button.setEnabled(True)
+            self.banner.put(
+                "submit-error",
+                BannerItem(
+                    item_id="submit-error",
+                    banner_type="error",
+                    header=tr("Submission error"),
+                    body=str(exc),
+                    dismissible=True,
                 ),
-                str(exc),
-            )  # type: ignore[call-arg]
-            job_progress_dialog.close()
+            )
+
+    def _on_banner_submission_succeeded(self, job_id: str) -> None:
+        """Handle successful submission from the banner handler."""
+        self._submission_succeeded_signal_receiver(job_id)
+        self.submit_button.setEnabled(True)

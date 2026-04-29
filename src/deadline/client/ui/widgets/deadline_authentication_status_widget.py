@@ -8,18 +8,18 @@ The current status is handled by DeadlineAuthenticationStatus.
 """
 
 import enum
+from pathlib import Path as _Path
 
 from dataclasses import dataclass
 from logging import getLogger
 from typing import Callable, Union, Dict, Optional
 
-from qtpy.QtCore import Signal
+from qtpy.QtCore import Qt, Signal
+from qtpy.QtGui import QPixmap
 from .._utils import tr
 from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
     QHBoxLayout,
     QLabel,
-    QApplication,
-    QStyle,
     QMenu,
     QPushButton,
     QMessageBox,
@@ -30,6 +30,12 @@ from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
 from ... import api
 from ..deadline_authentication_status import DeadlineAuthenticationStatus
 from ...config import config_file
+
+_STATUS_ICONS = {
+    "ok": str(_Path(__file__).parent.parent / "resources" / "status_ok.svg"),
+    "warning": str(_Path(__file__).parent.parent / "resources" / "status_warning.svg"),
+    "loading": str(_Path(__file__).parent.parent / "resources" / "status_loading.svg"),
+}
 
 logger = getLogger(__name__)
 
@@ -75,7 +81,7 @@ class AuthenticationStateConfig:
             Defaults to False.
     """
 
-    icon: QStyle.StandardPixmap
+    icon: str  # path to SVG icon file
     text: Union[str, Callable[[], str]]
     switch_profile_button_visible: bool = False
     login_visible: bool = False
@@ -168,9 +174,16 @@ class DeadlineAuthenticationStatusWidget(QGroupBox):
         self._profile_button.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                border: none;
-                padding-right: 5px;
+                border: 2px solid #8456CE;
+                border-radius: 8px;
+                padding: 4px 8px;
                 text-align: left;
+                color: #d1d5db;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                border-color: #9469D6;
+                background-color: #1a1025;
             }
         """)
 
@@ -234,16 +247,16 @@ class DeadlineAuthenticationStatusWidget(QGroupBox):
         """
         return {
             AuthenticationState.REFRESHING: AuthenticationStateConfig(
-                icon=QStyle.StandardPixmap.SP_BrowserReload,
+                icon=_STATUS_ICONS["loading"],
                 text=self._get_profile_name,
             ),
             AuthenticationState.AUTHENTICATED_READY: AuthenticationStateConfig(
-                icon=QStyle.StandardPixmap.SP_DialogApplyButton,
+                icon=_STATUS_ICONS["ok"],
                 text=self._get_profile_name,
                 logout_visible=self._should_show_logout,
             ),
             AuthenticationState.AUTHENTICATED_NO_API: AuthenticationStateConfig(
-                icon=QStyle.StandardPixmap.SP_MessageBoxWarning,
+                icon=_STATUS_ICONS["warning"],
                 text=lambda: tr(
                     "{profile} doesn't have access permissions to submit a job."
                 ).format(profile=self._get_profile_name()),
@@ -251,7 +264,7 @@ class DeadlineAuthenticationStatusWidget(QGroupBox):
                 more_info_visible=True,
             ),
             AuthenticationState.NEEDS_LOGIN: AuthenticationStateConfig(
-                icon=QStyle.StandardPixmap.SP_MessageBoxWarning,
+                icon=_STATUS_ICONS["warning"],
                 text=tr("{profile}  -  You are logged out.").format(
                     profile=self._get_profile_name()
                 ),
@@ -259,14 +272,14 @@ class DeadlineAuthenticationStatusWidget(QGroupBox):
                 login_visible=True,
             ),
             AuthenticationState.CONFIGURATION_ERROR: AuthenticationStateConfig(
-                icon=QStyle.StandardPixmap.SP_MessageBoxWarning,
+                icon=_STATUS_ICONS["warning"],
                 text=lambda: tr(
                     "A configuration error was received while accessing credentials for the profile '{profile}'."
                 ).format(profile=self._get_profile_name()),
                 more_info_visible=True,
             ),
             AuthenticationState.UNEXPECTED_ERROR: AuthenticationStateConfig(
-                icon=QStyle.StandardPixmap.SP_MessageBoxWarning,
+                icon=_STATUS_ICONS["warning"],
                 text=tr("There was an error with authentication"),
                 more_info_visible=True,
             ),
@@ -377,7 +390,9 @@ class DeadlineAuthenticationStatusWidget(QGroupBox):
                 UI settings for the current authentication state.
         """
         # Set icon
-        self._status_icon.setPixmap(QApplication.style().standardIcon(config.icon).pixmap(16, 16))
+        self._status_icon.setPixmap(
+            QPixmap(config.icon).scaled(16, 16, mode=Qt.SmoothTransformation)
+        )
 
         # Set text
         text = config.text() if callable(config.text) else config.text

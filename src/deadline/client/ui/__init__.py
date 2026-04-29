@@ -6,6 +6,8 @@ interfaces that use Deadline Cloud.
 """
 
 __all__ = [
+    "apply_cloudscape_theme",
+    "apply_cloudscape_stylesheet",
     "block_signals",
     "gui_error_handler",
     "gui_context_for_cli",
@@ -13,3 +15,4 @@ __all__ = [
 ]
 
 from ._utils import block_signals, gui_error_handler, gui_context_for_cli, CancelationFlag
+from .cloudscape_theme import apply_cloudscape_theme, apply_cloudscape_stylesheet

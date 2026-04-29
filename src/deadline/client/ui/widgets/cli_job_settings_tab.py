@@ -12,7 +12,8 @@ from .._utils import tr
 from qtpy.QtWidgets import (  # type: ignore
     QCheckBox,
     QComboBox,
-    QGridLayout,
+    QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QSizePolicy,
@@ -45,7 +46,8 @@ class CliJobSettingsWidget(QWidget):
         getattr(self, prop_name + "_label").setEnabled(enabled)
 
     def _build_ui(self):
-        layout = QGridLayout(self)
+        layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.bash_script = QTextEdit()
         if os.name == "nt":
@@ -62,18 +64,20 @@ class CliJobSettingsWidget(QWidget):
         self.bash_script.setCurrentFont(font)
         self.bash_script.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        layout.addWidget(self.bash_script, 0, 0, 1, 2)
+        layout.addRow(self.bash_script)
 
+        # Array parameter: checkbox + name field on the same row
+        array_row = QHBoxLayout()
         self.use_array_parameter_chck = QCheckBox(tr("Use array parameter"), self)
         self.array_parameter_name = QLineEdit(self)
-        layout.addWidget(self.use_array_parameter_chck, 1, 0)
-        layout.addWidget(self.array_parameter_name, 1, 1)
+        array_row.addWidget(self.use_array_parameter_chck)
+        array_row.addWidget(self.array_parameter_name)
+        layout.addRow(array_row)
         self.use_array_parameter_chck.stateChanged.connect(self.use_array_parameter_changed)
 
         self.array_parameter_values_label = QLabel(tr("Array parameter values"))
-        layout.addWidget(self.array_parameter_values_label, 2, 0)
         self.array_parameter_values = QLineEdit(self)
-        layout.addWidget(self.array_parameter_values, 2, 1)
+        layout.addRow(self.array_parameter_values_label, self.array_parameter_values)
 
         self.data_dir_label = QLabel(tr("Data directory"))
         self.data_dir_edit = DirectoryPickerWidget(
@@ -81,14 +85,12 @@ class CliJobSettingsWidget(QWidget):
             directory_label="Data directory",
             parent=self,
         )
-        layout.addWidget(self.data_dir_label, 3, 0)
-        layout.addWidget(self.data_dir_edit, 3, 1)
+        layout.addRow(self.data_dir_label, self.data_dir_edit)
 
         self.file_format_label = QLabel(tr("Template file format"))
         self.file_format_box = QComboBox(parent=self)
         self.file_format_box.addItems(["YAML", "JSON"])
-        layout.addWidget(self.file_format_label, 4, 0)
-        layout.addWidget(self.file_format_box, 4, 1)
+        layout.addRow(self.file_format_label, self.file_format_box)
 
     def _load_initial_settings(self, initial_settings: CliJobSettings):
         self.bash_script.setPlainText(initial_settings.bash_script_contents)

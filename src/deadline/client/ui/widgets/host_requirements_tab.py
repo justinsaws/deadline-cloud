@@ -34,7 +34,6 @@ from qtpy.QtWidgets import (  # type: ignore
     QListView,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
     QRadioButton,
     QSizePolicy,
     QSpacerItem,
@@ -44,6 +43,7 @@ from qtpy.QtWidgets import (  # type: ignore
 )
 
 from deadline.client.exceptions import NonValidInputError
+from .styled_buttons import StyledButton as QPushButton  # noqa: N812
 
 from ..dataclasses import CustomRequirements, HardwareRequirements, HostRequirements, OsRequirements
 
@@ -802,7 +802,11 @@ class CustomAttributeWidget(CustomCapabilityWidget):
 
         else:
             self.add_value_button = QPushButton(tr("Add"))
-            self.add_value_button.setStyleSheet("border-width: 0px")
+            self.add_value_button.setStyleSheet(
+                "QPushButton { background: transparent; border: none; color: #8cb4ff;"
+                " font-size: 12px; padding: 2px 4px; border-radius: 0; }"
+                "QPushButton:hover { text-decoration: underline; }"
+            )
             self.add_value_button.setToolTip(
                 "Add a new value to evaluate against for this attribute"
             )
